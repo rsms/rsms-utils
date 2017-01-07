@@ -1,0 +1,311 @@
+#!/usr/bin/env node
+"use strict"
+const fs = require('fs')
+const childproc = require('child_process')
+const {basename, normalize, dirname} = require('path')
+
+function isfile(filename) {
+  try { return fs.statSync(filename).isFile() } catch (_) { return false }
+}
+
+function parseargs(args, defaultOpts) {
+  let optsEnded = false, m
+  const opts = defaultOpts ? Object.extend({},defaultOpts) : {}
+  const re = /^-{1,2}([^=:]+)(?:\s*[=:]\s*(.+)|)$/
+  let argStartIndex = 0
+  for (let L = args.length; argStartIndex != L; ++argStartIndex) {
+    let arg = args[argStartIndex]
+    if (arg == '--') {
+      ++argStartIndex
+      break
+    } else if (arg[0] != '-') {
+      break
+    }
+    let m = re.exec(arg)
+    opts[m[1]] = m[2] === undefined ? true : m[2]
+  }
+  return {opts, args: argStartIndex == 0 ? args : args.slice(argStartIndex)}
+}
+
+// process state
+const NOT_STARTED = 0, RUNNING = 1, EXITED = 2
+
+function terminate(proc) { // :Promise<void>
+  if (!proc || proc.state != RUNNING) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve, reject) => {
+    const signals = ['SIGTERM', 'SIGINT', 'SIGKILL']
+    const timeout = 200
+
+    let signalIndex = 0
+    let killTimer = null
+    let timeoutReached = false
+
+    proc.once('exit', () => {
+      clearTimeout(killTimer)
+      if (!timeoutReached) {
+        resolve()
+      }
+    })
+
+    let kill = function() {
+      let sig = signals[signalIndex++]
+      if (sig == undefined) {
+        timeoutReached = true
+        return reject(new Error('timeout'))
+      }
+      proc.kill(sig)
+      clearTimeout(killTimer)
+      killTimer = setTimeout(kill, timeout)
+    }
+
+    kill()
+  })
+}
+
+function spawn(args) { // :Promise<ChildProcess>
+  return new Promise((resolve, reject) => {
+    const opts = {stdio:'inherit'}
+    const proc = childproc.spawn(args[0], args.slice(1), opts)
+    proc.state = NOT_STARTED
+    let cleanup = null
+
+    let onexit = function() {
+      proc.state = EXITED
+      if (cleanup) {
+        process.removeListener('exit', cleanup)
+        process.removeListener('error', cleanup)
+      }
+    }
+
+    const checkalive = function() {
+      if (proc.state == NOT_STARTED) {
+        if (proc.pid !== undefined) {
+          proc.state = RUNNING
+          proc.terminate = terminate.bind(null, proc); // :Promise<void>
+          cleanup = function() { proc.kill('SIGKILL') }
+          process.on('exit', cleanup)
+          process.on('error', cleanup)
+          resolve(proc)
+        } else {
+          process.nextTick(checkalive)
+        }
+      }
+    }
+    process.nextTick(checkalive)
+
+    proc.on('exit', onexit)
+
+    const onErr = function(err) {
+      if (proc.state == NOT_STARTED) {
+        onexit()
+        reject(err)
+        proc.removeListener('error', onErr)
+      }
+    }
+    proc.on('error', onErr)
+  })
+}
+
+function mtime(file) {
+  try {
+    const st = fs.statSync(file)
+    if (st.isFile()) {
+      return st.mtime.getTime()
+    }
+  } catch (_) {}
+  return 0
+}
+
+function main() {
+  const {opts, args} = parseargs(process.argv.slice(2))
+  const progpath = process.env._ || basename(process.argv[1])
+  const progname = basename(progpath)
+  const askedForHelp = opts.h || opts.help
+
+  if (askedForHelp || args.length == 0) {
+    const desc0 = [
+      'Automatically spawn and manage processes as file changes.',
+    ], desc1 = [
+       `Usage: ${progpath} [options] <file> [<cmdpattern>]`
+      ,'options:'
+      ,'  -h[elp]        Show description and detailed help for this program.'
+      ,'  -v[erbose]     Print some details to stdout.'
+      ,'  -s[top]        Exit with an error if <file> disappears from the file system.'
+      ,'  -clear-screen  Clear terminal screen before (re)starting the command.'
+      ,'  -no-banner     Don\'t print banner to stdout when restarting the command.'
+    ], desc2 = [
+       ''
+      ,'<file>        File to watch for changes'
+      ,''
+      ,'<cmdpattern>  Pattern for command to execute, replacing ":" with <file>.'
+      ,'              If not specified or if <cmdpattern> does not include a ":"'
+      ,'              argument, <file> is executed with <cmdpattern> as arguments.'
+      ,'              If you need to pass an argument of value ":", use "\\" which'
+      ,'              will be expanded to ":" rather than <file>.'
+      ,''
+      ,'Examples: (INVOCATION  # COMMAND EXECUTED)'
+      ,`  ${progname} foo.sh bar             # bar`
+      ,`  ${progname} foo.sh : bar           # foo.sh bar`
+      ,`  ${progname} foo.js node --check :  # node --check foo.js`
+      ,`  ${progname} foo.py python : \\\\: a  # python foo.py : a`
+      ,''
+    ];
+    if (askedForHelp) {
+      console.error(desc0.concat(desc1.concat(desc2)).join('\n'))
+      process.exit(0)
+    } else {
+      console.error(desc1.join('\n') + `\nTry "${progpath} -help" for more information`)
+      process.exit(1)
+    }
+  }
+
+  const verbose = opts.v || opts.verbose
+  const logverbose = verbose ? console.log.bind(console) : function(){}
+  const filename = args[0]
+  const path = normalize(filename)
+  const dir = dirname(args[0])
+  const fileslot = Symbol('fileslot')
+
+  const die = function(msg) {
+    console.error(`${progpath}: ${msg}`)
+    process.exit(1)
+  }
+
+  if (!isfile(filename)) {
+    console.error(filename, 'is not a file')
+    process.exit(1)
+  }
+
+  // parse command
+  let fileslotInCmd = true
+  let cmd = [fileslot]
+  if (args.length > 1) {
+    cmd = args.slice(1).map(arg => {
+      return (arg == ':') ? fileslot :
+             (arg == '\\:') ? ':' :
+             arg
+    })
+    fileslotInCmd = cmd.indexOf(fileslot) != -1
+  }
+
+  function fmtcmd(filename) {
+    return cmd.map(c =>
+      c == fileslot ? (filename ? JSON.stringify(filename) : '<file>')
+                    : JSON.stringify(c) ).join(' ')
+  }
+
+  logverbose('<cmdpattern> =', fmtcmd())
+
+  const clearScreen = opts['clear-screen'] ?
+    function() { process.stdout.write('\x1b[2J') } : function(){};
+
+  const hline = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'+
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
+  const space = '                                        '+
+                '                                        ';
+
+  let needCR = false
+
+  const resetLine = function() {
+    if (needCR) {
+      process.stdout.write('\r')
+      needCR = false
+    }
+  }
+
+  const printHeaderStarting = function(name) {
+    if (!fileslotInCmd) { name = cmd.join(' ') }
+    resetLine()
+    process.stdout.write(hline.substr(0,20) + ` starting ${name} ...`)
+    needCR = true
+  }
+
+  const printFooterEnded = function(code) {
+    resetLine()
+    const hline20 = hline.substr(0,20)
+    process.stdout.write(`${hline20} exit ${code} ${hline20}`)
+    needCR = true
+  }
+
+  const printHeaderStarted = function(name, pid) {
+    if (!fileslotInCmd) { name = cmd.join(' ') }
+    const time = (new Date()).toLocaleTimeString()
+    const timehline = hline.substr(0, time.length)
+
+    const namelen = Math.max(40, name.length)
+    if (namelen > name.length) {
+      name += space.substr(0, namelen - name.length)
+    }
+    name += pid.toString()
+
+    const namehline = hline.substr(0, name.length)
+
+    resetLine()
+    process.stdout.write(
+      '┏━' + timehline + '━┳━' + namehline + '━┓\n' +
+      `┃ ${time} ┃ ${name} ┃\n` +
+      '┗━' + timehline + '━┻━' + namehline + '━┛\n'
+    )
+  }
+
+  const spawnfile = function(filename) {
+    logverbose('spawn', fmtcmd(filename))
+    const args = cmd.map(c => c == fileslot ? filename : c)
+    return spawn(args).catch(die).then(proc => {
+      if (!opts['no-banner']) {
+        printHeaderStarted(basename(filename), proc.pid)
+      }
+      proc.once('exit', (code, signal) => {
+        if (signal === null && !opts['no-banner']) {
+          printFooterEnded(code)
+        } // else: process was terminated by signal
+      })
+      return proc
+    })
+  }
+
+  let lastMTime = mtime(filename)
+
+  clearScreen()
+  spawnfile(filename).then(proc => {
+
+    const restart = function(name, path) {
+      // (re)start process
+      return proc.terminate().catch(die).then(() => {
+        clearScreen()
+        if (!opts['no-banner']) {
+          printHeaderStarting(name)
+        }
+        return spawnfile(path).then(p => (proc = p))
+      })
+    }
+
+    // watch file
+    const watcher = fs.watch(path, {}, (event, name) => {
+      logverbose('fsevent', event, name)
+      let path = dir + '/' + name
+      if (isfile(path)) {
+        // Sometimes we get multiple change events when the file has changed only once.
+        // We compare the mtime of the file to filter out redundant fs events.
+        const currMTime = mtime(filename)
+        if (currMTime != lastMTime) {
+          lastMTime = currMTime
+          restart(name, path)
+        }
+      } else {
+        lastMTime = 0
+        proc.terminate().catch(die)
+        if (opts.s || opts.stop) {
+          watcher.close()
+          console.error(name, 'disappeared')
+          process.exit(1)
+        }
+      }
+    })
+  })
+}
+
+main()
+
