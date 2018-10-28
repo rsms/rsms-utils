@@ -123,21 +123,23 @@ function main() {
   const progpath = process.env._ || basename(process.argv[1])
   const progname = basename(progpath)
   const askedForHelp = opts.h || opts.help
+  let reactionTime = 100
 
   if (askedForHelp || args.length == 0) {
     const desc0 = [
       'Automatically spawn and manage processes as file changes.',
     ], desc1 = [
-       `Usage: ${progpath} [options] <file> [<cmdpattern>]`
+       `Usage: ${progpath} [options] <file> ... [-- <cmdpattern>]`
       ,'options:'
-      ,'  -h[elp]        Show description and detailed help for this program.'
-      ,'  -v[erbose]     Print some details to stdout.'
-      ,'  -s[top]        Exit with an error if <file> disappears from the file system.'
-      ,'  -clear-screen  Clear terminal screen before (re)starting the command.'
-      ,'  -no-banner     Don\'t print banner to stdout when restarting the command.'
+      ,'  -h[elp]             Show description and detailed help for this program.'
+      ,'  -v[erbose]          Print some details to stdout.'
+      ,'  -s[top]             Exit with an error if <file> disappears from the file system.'
+      ,'  -c[lear-screen]     Clear terminal screen before (re)starting the command.'
+      ,`  -r[eact-in]=<msec>  React within <msec> to file changes. Defaults to ${reactionTime}.`
+      ,'  -no-banner          Don\'t print banner to stdout when restarting the command.'
     ], desc2 = [
        ''
-      ,'<file>        File to watch for changes'
+      ,'<file>        Files to watch for changes'
       ,''
       ,'<cmdpattern>  Pattern for command to execute, replacing ":" with <file>.'
       ,'              If not specified or if <cmdpattern> does not include a ":"'
@@ -146,10 +148,11 @@ function main() {
       ,'              will be expanded to ":" rather than <file>.'
       ,''
       ,'Examples: (INVOCATION  # COMMAND EXECUTED)'
-      ,`  ${progname} foo.sh bar             # bar`
-      ,`  ${progname} foo.sh : bar           # foo.sh bar`
-      ,`  ${progname} foo.js node --check :  # node --check foo.js`
-      ,`  ${progname} foo.py python : \\\\: a  # python foo.py : a`
+      ,`  ${progname} foo.sh                      # foo.sh`
+      ,`  ${progname} foo.sh vars.sh              # foo.sh`
+      ,`  ${progname} foo.sh -- : bar             # foo.sh bar`
+      ,`  ${progname} foo.js -- node --check :    # node --check foo.js`
+      ,`  ${progname} foo.py -- python : \\\\: a  # python foo.py : a`
       ,''
     ];
     if (askedForHelp) {
@@ -161,28 +164,46 @@ function main() {
     }
   }
 
-  const verbose = opts.v || opts.verbose
-  const logverbose = verbose ? console.log.bind(console) : function(){}
-  const filename = args[0]
-  const path = normalize(filename)
-  const dir = dirname(args[0])
-  const fileslot = Symbol('fileslot')
-
   const die = function(msg) {
     console.error(`${progpath}: ${msg}`)
     process.exit(1)
   }
 
-  if (!isfile(filename)) {
-    console.error(filename, 'is not a file')
-    process.exit(1)
+  const verbose = opts.v || opts.verbose
+  const logverbose = verbose ? console.log.bind(console) : function(){}
+
+  if ('r' in opts || 'react-in' in opts) {
+    let v = parseInt(opts.r || opts['react-in'])
+    if (typeof v != 'number' || isNaN(v) || v <= 0) {
+      die(`invalid -react-in value: ${opts.r || opts['react-in']}`)
+    }
+    reactionTime = v
   }
+
+  const p = args.indexOf('--')
+  const infiles = p == -1 ? args : args.slice(0, p)
+  const runargs = p == -1 ? infiles[0] : args.slice(p + 1)
+
+  if (infiles.length == 0) {
+    die('no input files')
+  }
+
+  // const filename = args[0]
+  // const path = normalize(filename)
+  // const dir = dirname(args[0])
+
+  const fileslot = Symbol('fileslot')
+
+  // if (!isfile(filename)) {
+  //   console.error(filename, 'is not a file')
+  //   process.exit(1)
+  // }
 
   // parse command
   let fileslotInCmd = true
   let cmd = [fileslot]
-  if (args.length > 1) {
-    cmd = args.slice(1).map(arg => {
+  if (runargs.length > 0) {
+    cmd = runargs.map(arg => {
       return (arg == ':') ? fileslot :
              (arg == '\\:') ? ':' :
              arg
@@ -198,7 +219,7 @@ function main() {
 
   logverbose('<cmdpattern> =', fmtcmd())
 
-  const clearScreen = opts['clear-screen'] ?
+  const clearScreen = (opts.c || opts['clear-screen']) ?
     function() { process.stdout.write('\x1b[2J') } : function(){};
 
   const hline = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'+
@@ -218,7 +239,9 @@ function main() {
   const printHeaderStarting = function(name) {
     if (!fileslotInCmd) { name = cmd.join(' ') }
     resetLine()
-    process.stdout.write(hline.substr(0,20) + ` starting ${name} ...`)
+    process.stdout.write(
+      hline.substr(0,20) + ` ${name} changed -- restarting...`
+    )
     needCR = true
   }
 
@@ -251,7 +274,7 @@ function main() {
   }
 
   const spawnfile = function(filename) {
-    logverbose('spawn', fmtcmd(filename))
+    logverbose('\nspawn', fmtcmd(filename))
     const args = cmd.map(c => c == fileslot ? filename : c)
     return spawn(args).catch(die).then(proc => {
       if (!opts['no-banner']) {
@@ -266,45 +289,93 @@ function main() {
     })
   }
 
-  let lastMTime = mtime(filename)
+  function inputMTime() {
+    return infiles.reduce((maxval, file) => {
+      return Math.max(maxval, mtime(file))
+    }, 0)
+  }
+
+  let lastMTime = inputMTime()
 
   clearScreen()
-  spawnfile(filename).then(proc => {
+  spawnfile(infiles[0]).then(proc => {
+
+    let isRestarting = false
 
     const restart = function(name, path) {
       // (re)start process
-      return proc.terminate().catch(die).then(() => {
-        clearScreen()
-        if (!opts['no-banner']) {
-          printHeaderStarting(name)
-        }
-        return spawnfile(path).then(p => (proc = p))
-      })
+      if (isRestarting) {
+        return
+      }
+      isRestarting = true
+      setTimeout(() => {
+        proc.terminate().catch(die).then(() => {
+          isRestarting = false
+          clearScreen()
+          if (!opts['no-banner']) {
+            printHeaderStarting(name)
+          }
+          return spawnfile(path).then(p => (proc = p))
+        })
+      }, reactionTime)
     }
 
-    // watch file
-    const watcher = fs.watch(path, {}, (event, name) => {
-      logverbose('fsevent', event, name)
-      let path = dir + '/' + name
-      if (isfile(path)) {
-        // Sometimes we get multiple change events when the file has changed only once.
-        // We compare the mtime of the file to filter out redundant fs events.
-        const currMTime = mtime(filename)
-        if (currMTime != lastMTime) {
-          lastMTime = currMTime
-          restart(name, path)
-        }
-      } else {
-        lastMTime = 0
-        proc.terminate().catch(die)
-        if (opts.s || opts.stop) {
-          watcher.close()
-          console.error(name, 'disappeared')
-          process.exit(1)
-        }
+    var watchers = new Map()
+
+    function stopWatching(filename) {
+      let watcher = watchers.get(filename)
+      if (watcher) {
+        watcher.close()
       }
+    }
+
+    function startWatching(filename, isPrimaryInfile) {
+      let watcher = watchers.get(filename)
+      if (watcher) {
+        watcher.close()
+      }
+      watchers.set(filename, fs.watch(filename, {}, (event, name) => {
+        logverbose('fsevent', event, name)
+        let filename2 = dirname(filename) + '/' + name
+        if (isfile(filename2)) {
+          // Sometimes we get multiple change events when the file has changed
+          // only once. We compare the mtime of the file to filter out
+          // redundant fs events.
+          const currMTime = mtime(filename)
+          // const currMTime = inputMTime()
+          if (currMTime != lastMTime) {
+            lastMTime = currMTime
+
+            if (event != 'change' || filename !== filename2) {
+              stopWatching(filename)
+              setImmediate(() => startWatching(filename2, isPrimaryInfile))
+            }
+
+            if (isPrimaryInfile) {
+              restart(name, filename2)
+            } else {
+              restart(name, infiles[0])
+            }
+          }
+        } else {
+          lastMTime = 0
+          proc.terminate().catch(die)
+          if (opts.s || opts.stop) {
+            stopWatching(filename)
+            console.error(name, 'disappeared')
+            process.exit(1)
+          }
+        }
+      }))
+    }
+
+    // watch input files
+    infiles.forEach((infile, infileIndex) => {
+      logverbose('watch', infile)
+      startWatching(infile, infileIndex == 0)
     })
-  })
+  }) // infiles.forEach
+
 }
 
 main()
