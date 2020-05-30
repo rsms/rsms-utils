@@ -4,6 +4,103 @@ const fs = require('fs')
 const childproc = require('child_process')
 const {basename, normalize, dirname} = require('path')
 
+
+// terminal ANSI styling
+function termStyle(wstream, hint /* :bool|undefined */) {
+  let ncolors = 0
+  if (hint === true) {
+    // use colors regardless of TTY or not
+    let t = process.env.TERM || ""
+    ncolors = (
+      t && ['xterm','screen','vt100'].some(s => t.indexOf(s) != -1) ? (
+        t.indexOf('256color') != -1 ? 8 : 4
+      ) : 2
+    )
+  } else if (hint !== false && wstream.isTTY) {
+    // unless hint is explicitly false, use colors if stdout is a TTY
+    ncolors = wstream.getColorDepth()
+  }
+  const sfn = (
+    ncolors >= 8 ? (open16, open256, close) => {
+      let a = '\x1b[' + open256 + 'm', b = '\x1b[' + close + 'm'
+      return s => a + s + b
+    } :
+    ncolors > 0 ? (open16, open256, close) => {
+      let a = '\x1b[' + open16 + 'm', b = '\x1b[' + close + 'm'
+      return s => a + s + b
+    } :
+    () => s => s
+  )
+
+  const [ black, red, green, yellow, blue, magenta, cyan, white ] =
+        Array.apply(null, new Array(8)).map((_, i) => '38;5;' + i )
+
+  const [ brightBlack, brightRed, brightGreen, brightYellow, brightBlue,
+          brightMagenta, brightCyan, brightWhite ] =
+        Array.apply(null, new Array(16)).map((_, i) => '38;5;' + i ).slice(8)
+
+  // const [ brightBlack, brightRed, brightGreen, brightYellow, brightBlue,
+  //         brightMagenta, brightCyan, brightWhite ] = FG.slice(8, 16)
+
+  // const FG = Array.apply(null, new Array(256)).map((_, i) => '38;5;' + i )
+  // const BG = Array.apply(null, new Array(256)).map((_, i) => '48;5;' + i )
+  // const [ black, red, green, yellow, blue, magenta, cyan, white ] = FG.slice(0, 8)
+  // const [ brightBlack, brightRed, brightGreen, brightYellow, brightBlue,
+  //         brightMagenta, brightCyan, brightWhite ] = FG.slice(8, 16)
+  // // standard
+  // console.log(FG.slice(0, 8).map((s, i) => `\x1b[${s}m((${s}))\x1b[0m`).join("  "))
+  // console.log(FG.slice(0, 8).map((s, i) => `\x1b[1m\x1b[${s}m((${s}))\x1b[0m`).join("  "))
+
+  // // bright
+  // console.log(FG.slice(8, 16).map((s, i) => `\x1b[${s}m((${s}))\x1b[0m`).join("  "))
+
+  // // greyscale black -> white
+  // console.log(FG.slice(232, 256).map((s, i) => `\x1b[${s}m((${s}))\x1b[0m`).join("  "))
+
+  return {
+    ncolors,
+    reset: "\x1b[0m",
+    // name           16c    256c                 close
+
+    // effects
+    bold        : sfn('1',   '1',                 '22'),
+    italic      : sfn('3',   '3',                 '23'),
+    underline   : sfn('4',   '4',                 '24'),
+    inverse     : sfn('7',   '7',                 '27'),
+
+    // standard colors
+    white       : sfn('37',  brightWhite,         '39'),
+    black       : sfn('30',  brightBlack,         '39'),
+    red         : sfn('31',  red,                 '39'),
+    green       : sfn('32',  green,               '39'),
+    blue        : sfn('34',  blue,                '39'),
+    cyan        : sfn('36',  cyan,                '39'),
+    magenta     : sfn('35',  magenta,             '39'),
+    yellow      : sfn('33',  yellow,              '39'),
+
+    // extended colors
+    purple      : sfn('35',  '38;5;141',          '39'),
+    pink        : sfn('35',  '38;5;211',          '39'),
+    lightyellow : sfn('93',  '38;5;229',          '39'),
+    orange      : sfn('33',  '38;5;215',          '39'),
+
+    // greyscale. Goes from black to white
+    grey5       : sfn('90',  '38;5;236',          '39'),
+    grey4       : sfn('90',  '38;5;240',          '39'),
+    grey3       : sfn('90',  '38;5;244',          '39'),
+    grey        : sfn('90',  '38;5;244',          '39'),
+    grey2       : sfn('90',  '38;5;248',          '39'),
+    grey1       : sfn('90',  '38;5;252',          '39'),
+  }
+}
+
+const nocolor  = process.argv.includes("-no-color")
+const yescolor = process.argv.includes("-color")
+const outstyle = termStyle(process.stdout, nocolor ? false : yescolor || undefined)
+const errstyle = termStyle(process.stderr, nocolor ? false : yescolor || undefined)
+
+
+
 function isfile(filename) {
   try { return fs.statSync(filename).isFile() } catch (_) { return false }
 }
@@ -31,7 +128,9 @@ function parseargs(args, defaultOpts) {
 const NOT_STARTED = 0, RUNNING = 1, EXITED = 2
 
 function terminate(proc) { // :Promise<void>
+  // console.log("\nTERMINATE\n")
   if (!proc || proc.state != RUNNING) {
+    // console.log("\nTERMINATE A\n")
     return Promise.resolve()
   }
   return new Promise((resolve, reject) => {
@@ -43,8 +142,10 @@ function terminate(proc) { // :Promise<void>
     let timeoutReached = false
 
     proc.once('exit', () => {
+      // console.log("\nTERMINATE exit\n")
       clearTimeout(killTimer)
       if (!timeoutReached) {
+        // setTimeout(resolve, 1000)
         resolve()
       }
     })
@@ -53,23 +154,44 @@ function terminate(proc) { // :Promise<void>
       let sig = signals[signalIndex++]
       if (sig == undefined) {
         timeoutReached = true
+        // console.log("\nTERMINATE timeout\n")
         return reject(new Error('timeout'))
       }
+      // console.log(`\nTERMINATE kill sig=${sig}\n`)
+
       proc.kill(sig)
+      // childproc.spawnSync('kill', [proc.pid])
+
       clearTimeout(killTimer)
       killTimer = setTimeout(kill, timeout)
     }
 
     kill()
+
+    proc.unref()
   })
 }
 
 function spawn(args) { // :Promise<ChildProcess>
   return new Promise((resolve, reject) => {
-    const opts = {stdio:'inherit'}
+    const opts = {
+      stdio: ['pipe','inherit','inherit'],
+      shell: true,
+      detached: true,
+    }
     const proc = childproc.spawn(args[0], args.slice(1), opts)
     proc.state = NOT_STARTED
     let cleanup = null
+
+    proc.stdin.end()
+
+    // proc.stdout.on('data', (data) => {
+    //   console.log(`stdout: ${data}`);
+    // });
+
+    // proc.stderr.on('data', (data) => {
+    //   console.error(`stderr: ${data}`);
+    // });
 
     let onexit = function() {
       proc.state = EXITED
@@ -84,7 +206,9 @@ function spawn(args) { // :Promise<ChildProcess>
         if (proc.pid !== undefined) {
           proc.state = RUNNING
           proc.terminate = terminate.bind(null, proc); // :Promise<void>
-          cleanup = function() { proc.kill('SIGKILL') }
+          cleanup = function() {
+            // proc.kill('SIGKILL')
+          }
           process.on('exit', cleanup)
           process.on('error', cleanup)
           resolve(proc)
@@ -134,7 +258,10 @@ function main() {
       ,'  -h[elp]             Show description and detailed help for this program.'
       ,'  -v[erbose]          Print some details to stdout.'
       ,'  -s[top]             Exit with an error if <file> disappears from the file system.'
-      ,'  -c[lear-screen]     Clear terminal screen before (re)starting the command.'
+      ,'  -c[lear]            Clear terminal screen before (re)starting the command.'
+      ,'  -no-clear           Disable clear even when stdio are TTYs.'
+      ,'  -color              Enable stylized output even if stdio is not TTY.'
+      ,'  -no-color           Disable stylized output even if stdio is TTY.'
       ,`  -r[eact-in]=<msec>  React within <msec> to file changes. Defaults to ${reactionTime}.`
       ,'  -no-banner          Don\'t print banner to stdout when restarting the command.'
     ], desc2 = [
@@ -171,6 +298,13 @@ function main() {
 
   const verbose = opts.v || opts.verbose
   const logverbose = verbose ? console.log.bind(console) : function(){}
+  const clear = (
+    // -c, -clear     Unconditionally clear
+    // -no-clear      Disable clear
+    // (unspecified)  Clear only if stdout and stderr are TTYs
+    (opts.c || opts["clear"] || opts["clear-screen"]) ? true :
+    !opts["no-clear"] && process.stdout.isTTY && process.stderr.isTTY
+  )
 
   if ('r' in opts || 'react-in' in opts) {
     let v = parseInt(opts.r || opts['react-in'])
@@ -219,14 +353,65 @@ function main() {
 
   logverbose('<cmdpattern> =', fmtcmd())
 
-  const clearScreen = (opts.c || opts['clear-screen']) ?
-    function() { process.stdout.write('\x1b[2J') } : function(){};
+  const screen = new class {
+    constructor() {
+      // Note: \ec is reported to not work on the KDE console Konsole.
+      // TODO: detect KDE Konsole and use \e[2J instead
+      // Clear display: "\x1bc"
+      // Clear Screen: \x1b[{n}J clears the screen
+      //   n=0 clears from cursor until end of screen
+      //   n=1 clears from cursor to beginning of screen
+      //   n=2 clears entire screen
+      this.clear = clear ? () => { process.stdout.write('\x1bc') } : ()=>{}
+      const tty = (
+        process.stdout.isTTY ? process.stdout :
+        process.stderr.isTTY ? process.stderr :
+        null
+      )
+      this.width = 80
+      this.height = 40
+      if (tty) {
+        const update = () => {
+          this.width = tty.columns
+          this.height = tty.rows
+        }
+        tty.on("resize", update)
+        update()
+      }
+    }
+  }
 
-  const hline = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'+
-                '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
-  const space = '                                        '+
-                '                                        ';
 
+  // keepalive prints and immediately erases a line every second to work around issues with
+  // some terminals like iTerm and SSH connections without keepalive enabled.
+  // Clear Line: \x1b[{n}K clears the current line
+  //   n=0 clears from cursor to end of line
+  //   n=1 clears from cursor to start of line
+  //   n=2 clears entire line
+  let keepaliveTimer = null
+  let keepaliveCounter = 0
+  const keepalivePing = () => {
+    process.stdout.write(".\x1b[1D") // "." + move cursor left by 1
+    let id = keepaliveCounter
+    setTimeout(() => {
+      if (keepaliveTimer !== null && id == keepaliveCounter) {
+        process.stdout.write("\x1b[0K") // clear from cursor until end of line
+      }
+    }, 500)
+  }
+  const keepaliveStop = () => {
+    clearInterval(keepaliveTimer)
+    keepaliveTimer = null
+  }
+  const keepaliveStart = process.stdout.isTTY ? () => {
+    keepaliveCounter++
+    keepaliveStop()
+    keepaliveTimer = setInterval(keepalivePing, 1000)
+  } : ()=>{}
+
+
+  const message = msg => process.stdout.write(outstyle.inverse("> " + msg))
+  const hline = '━'
   let needCR = false
 
   const resetLine = function() {
@@ -239,41 +424,75 @@ function main() {
   const printHeaderStarting = function(name) {
     if (!fileslotInCmd) { name = cmd.join(' ') }
     resetLine()
-    process.stdout.write(
-      hline.substr(0,20) + ` ${name} changed -- restarting...`
-    )
+    message(`${name} changed -- restarting...`)
     needCR = true
   }
 
   const printFooterEnded = function(code) {
     resetLine()
-    const hline20 = hline.substr(0,20)
-    process.stdout.write(`${hline20} exit ${code} ${hline20}`)
+    message(`exit ${code}`)
     needCR = true
   }
 
-  const printHeaderStarted = function(name, pid) {
-    if (!fileslotInCmd) { name = cmd.join(' ') }
-    const time = (new Date()).toLocaleTimeString()
-    const timehline = hline.substr(0, time.length)
+  const printHeaderStarted = function(progFilename, pid) {
+    // ---------------------------
+    // | TIME | COMMAND      PID |
+    // ---------------------------
+    const linestart = "┃ "
+    const linesep   = " ┃ "
+    const lineend   = " ┃"
+    const cmdoverflow = "..."
+    let time = (new Date()).toLocaleTimeString()
+    let command = fileslotInCmd ? progFilename : cmd.join(' ')
+    let pidsep = " " // space between command and pid
+    let pidstr = pid.toString()
 
-    const namelen = Math.max(40, name.length)
-    if (namelen > name.length) {
-      name += space.substr(0, namelen - name.length)
+    const timehline = hline.repeat(time.length)
+    const commandhline = hline.repeat(command.length)
+
+    const commandWidth = Math.max(cmdoverflow.length + 1,
+      screen.width
+      - time.length
+      - pidstr.length
+      - pidsep.length
+      - linestart.length
+      - linesep.length
+      - lineend.length
+    )
+    if (commandWidth < command.length) {
+      command = command.substr(0, commandWidth - cmdoverflow.length) + cmdoverflow
     }
-    name += pid.toString()
 
-    const namehline = hline.substr(0, name.length)
+    const cmdline = command.padEnd(commandWidth, " ")
+    const line1 = '━'.repeat(time.length)
+    const line2 = '━'.repeat(cmdline.length + pidsep.length + pidstr.length)
 
     resetLine()
-    process.stdout.write(
-      '┏━' + timehline + '━┳━' + namehline + '━┓\n' +
-      `┃ ${time} ┃ ${name} ┃\n` +
-      '┗━' + timehline + '━┻━' + namehline + '━┛\n'
-    )
+    process.stdout.write(outstyle.grey(
+      '┏━' + line1 + '━┳━' + line2 + '━┓' + "\n" +
+      linestart + time + linesep + cmdline + pidsep + pidstr + lineend + "\n" +
+      '┗━' + line1 + '━┻━' + line2 + '━┛' + "\n"
+    ))
   }
 
+
+  const onStartProcess = () => {
+    logverbose('\nonStartProcess')
+    keepaliveStop()
+    screen.clear()
+  }
+
+  const onEndProcess = (exitCode, signal) => {
+    logverbose('\nonEndProcess', {exitCode, signal})
+    if (signal === null && !opts['no-banner']) {
+      printFooterEnded(exitCode)
+    } // else: process was terminated by signal
+    keepaliveStart()
+  }
+
+
   const spawnfile = function(filename) {
+    onStartProcess()
     logverbose('\nspawn', fmtcmd(filename))
     const args = cmd.map(c => c == fileslot ? filename : c)
     return spawn(args).catch(die).then(proc => {
@@ -281,23 +500,13 @@ function main() {
         printHeaderStarted(basename(filename), proc.pid)
       }
       proc.once('exit', (code, signal) => {
-        if (signal === null && !opts['no-banner']) {
-          printFooterEnded(code)
-        } // else: process was terminated by signal
+        onEndProcess(code, signal)
       })
       return proc
     })
   }
 
-  function inputMTime() {
-    return infiles.reduce((maxval, file) => {
-      return Math.max(maxval, mtime(file))
-    }, 0)
-  }
 
-  let lastMTime = inputMTime()
-
-  clearScreen()
   spawnfile(infiles[0]).then(proc => {
 
     let isRestarting = false
@@ -311,7 +520,6 @@ function main() {
       setTimeout(() => {
         proc.terminate().catch(die).then(() => {
           isRestarting = false
-          clearScreen()
           if (!opts['no-banner']) {
             printHeaderStarting(name)
           }
@@ -334,24 +542,23 @@ function main() {
       if (watcher) {
         watcher.close()
       }
+      let lastMTime = mtime(filename)
       watchers.set(filename, fs.watch(filename, {}, (event, name) => {
         logverbose('fsevent', event, name)
+
         let filename2 = dirname(filename) + '/' + name
         if (isfile(filename2)) {
           // Sometimes we get multiple change events when the file has changed
           // only once. We compare the mtime of the file to filter out
           // redundant fs events.
-          const currMTime = mtime(filename)
-          // const currMTime = inputMTime()
-          if (currMTime != lastMTime) {
+          const currMTime = mtime(filename2)
+          if (currMTime != lastMTime || filename != filename2) {
+            logverbose('mtime diff', filename, currMTime - lastMTime)
             lastMTime = currMTime
-
-            if (event != 'change' || filename !== filename2) {
+            if (event != 'change' || filename != filename2) {
               stopWatching(filename)
               setImmediate(() => startWatching(filename2, isPrimaryInfile))
-            }
-
-            if (isPrimaryInfile) {
+            } else if (isPrimaryInfile) {
               restart(name, filename2)
             } else {
               restart(name, infiles[0])
