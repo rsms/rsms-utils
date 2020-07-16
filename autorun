@@ -124,6 +124,30 @@ function parseargs(args, defaultOpts) {
   return {opts, args: argStartIndex == 0 ? args : args.slice(argStartIndex)}
 }
 
+const runningProcesses = new Set()
+
+const killproc = process.platform == 'win32' ? (proc, sig) => {
+  // process groups not supported on windows.
+  process.kill(proc.pid, sig)
+} : (proc, sig) => {
+  // negative pid on most posix OSes means "process group", includes its child processes.
+  process.kill(-proc.pid, sig)
+}
+
+function atexit(sig, code) {
+  if (runningProcesses.size > 0) {
+    for (let p of runningProcesses) {
+      killproc(p, 'SIGINT')
+    }
+    runningProcesses.clear()
+  }
+  process.exit(code === undefined ? 0 : code)
+}
+process.on('SIGINT', atexit)
+process.on('SIGTERM', atexit)
+process.on('SIGHUP', atexit)
+process.on('exit', (code) => { atexit("EXIT", code) })
+
 // process state
 const NOT_STARTED = 0, RUNNING = 1, EXITED = 2
 
@@ -134,8 +158,8 @@ function terminate(proc) { // :Promise<void>
     return Promise.resolve()
   }
   return new Promise((resolve, reject) => {
-    const signals = ['SIGTERM', 'SIGINT', 'SIGKILL']
-    const timeout = 200
+    const signals = ['SIGINT', 'SIGTERM', 'SIGKILL']
+    const timeout = 500
 
     let signalIndex = 0
     let killTimer = null
@@ -159,8 +183,8 @@ function terminate(proc) { // :Promise<void>
       }
       // console.log(`\nTERMINATE kill sig=${sig}\n`)
 
-      proc.kill(sig)
-      // childproc.spawnSync('kill', [proc.pid])
+      killproc(proc, sig)
+      // proc.kill(sig)
 
       clearTimeout(killTimer)
       killTimer = setTimeout(kill, timeout)
@@ -193,8 +217,11 @@ function spawn(args) { // :Promise<ChildProcess>
     //   console.error(`stderr: ${data}`);
     // });
 
+    runningProcesses.add(proc)
+
     let onexit = function() {
       proc.state = EXITED
+      runningProcesses.delete(proc)
       if (cleanup) {
         process.removeListener('exit', cleanup)
         process.removeListener('error', cleanup)
