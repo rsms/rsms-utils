@@ -1,6 +1,6 @@
 #!/bin/bash -e
 PROG=$(basename "$0")
-pushd "$(dirname "$0")" >/dev/null
+pushd "$(dirname "$0")/.." >/dev/null
 DATA_DIR=$PWD/data
 CACHEDIR=$PWD/.cache/color-space
 popd >/dev/null

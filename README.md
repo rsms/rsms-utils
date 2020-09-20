@@ -11,7 +11,7 @@ Collection of command-line programs to help with everyday computer life.
 cd ~/src
 git clone https://github.com/rsms/rsms-utils.git
 # edit your ~/.bashrc or ~/.zshrc shell file, adding:
-export PATH=$PATH:$HOME/src/rsms-utils
+export PATH=$PATH:$HOME/src/rsms-utils/bin
 ```
 
 
