@@ -271,8 +271,7 @@ function mtime(file) {
 
 function main() {
   const {opts, args} = parseargs(process.argv.slice(2))
-  const progpath = process.env._ || basename(process.argv[1])
-  const progname = basename(progpath)
+  const progname = basename(process.argv[1])
   const askedForHelp = opts.h || opts.help
   let reactionTime = 100
 
@@ -280,7 +279,7 @@ function main() {
     const desc0 = [
       'Automatically spawn and manage processes as file changes.',
     ], desc1 = [
-       `Usage: ${progpath} [options] <file> ... [-- <cmdpattern>]`
+       `Usage: ${progname} [options] <file> ... [-- <cmdpattern>]`
       ,'options:'
       ,'  -h[elp]             Show description and detailed help for this program.'
       ,'  -v[erbose]          Print some details to stdout.'
@@ -301,25 +300,25 @@ function main() {
       ,'              If you need to pass an argument of value ":", use "\\" which'
       ,'              will be expanded to ":" rather than <file>.'
       ,''
-      ,'Examples: (INVOCATION  # COMMAND EXECUTED)'
+      ,'Examples:'
       ,`  ${progname} foo.sh                      # foo.sh`
       ,`  ${progname} foo.sh vars.sh              # foo.sh`
       ,`  ${progname} foo.sh -- : bar             # foo.sh bar`
       ,`  ${progname} foo.js -- node --check :    # node --check foo.js`
-      ,`  ${progname} foo.py -- python : \\\\: a  # python foo.py : a`
+      ,`  ${progname} foo.py -- python : \\\\: a    # python foo.py : a`
       ,''
     ];
     if (askedForHelp) {
       console.error(desc0.concat(desc1.concat(desc2)).join('\n'))
       process.exit(0)
     } else {
-      console.error(desc1.join('\n') + `\nTry "${progpath} -help" for more information`)
+      console.error(desc1.join('\n') + `\nTry "${progname} -help" for more information`)
       process.exit(1)
     }
   }
 
   const die = function(msg) {
-    console.error(`${progpath}: ${msg}`)
+    console.error(`${progname}: ${msg}`)
     process.exit(1)
   }
 

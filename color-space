@@ -1,0 +1,537 @@
+#!/bin/bash -e
+PROG=$(basename "$0")
+pushd "$(dirname "$0")" >/dev/null
+DATA_DIR=$PWD/data
+CACHEDIR=$PWD/.cache/color-space
+popd >/dev/null
+
+# input data
+COMMAND=
+OUTFILE=
+INFILES=()
+OPT_SHA256=false  # -sha256
+TARGET_PROFILE=
+TARGET_PROFILE_NAME=
+TARGET_PROFILE_ICCFILE=
+TARGET_PROFILE_ICCFILE_CHECKSUM=
+
+BUILTIN_PROFILES=( \
+  "P3   : ${DATA_DIR}/display-p3.icc" \
+  "sRGB : ${DATA_DIR}/srgb.icc" \
+)
+
+USAGE_EXIT_CODE=1
+
+# cache directory
+mkdir -p "$CACHEDIR"
+
+# _key(" key : value ") => "key"
+# _value(" key : value ") => "value"
+function _key { echo ${1%%:*}; }
+function _value { echo ${1#*:}; }
+
+function _builtin_profile_names {
+  for ((i = 0; i < ${#BUILTIN_PROFILES[@]}; i++)); do
+    if ((i > 0)); then echo -n ", "; fi
+    echo -n "$(_key "${BUILTIN_PROFILES[$i]}")"
+  done
+}
+
+function _usage {
+  echo "Usage: $PROG <command> [options] <file>..." >&2
+  echo "Documentation: $PROG help" >&2
+  exit $USAGE_EXIT_CODE
+}
+
+function _use_magick {
+  if ! which magick >/dev/null; then
+    echo "magick not found in PATH." >&2
+    echo "This program relies on ImageMagick which provides the magick tool."
+    shopt -s nocasematch
+    local specific_help_shown=false
+    case "$(uname)" in
+    *darwin*)
+      if which brew >/dev/null; then
+        echo 'Try `brew install imagemagick`'
+        specific_help_shown=true
+      fi
+      ;;
+    *linux*)
+      if which apt >/dev/null; then
+        echo 'Try `apt install imagemagick`'
+        specific_help_shown=true
+      fi
+      ;;
+    esac
+    shopt -u nocasematch
+    if ! $specific_help_shown; then
+      echo "See https://imagemagick.org/"
+    fi
+    exit 1
+  fi
+}
+
+function _use_INFILES {
+  # check number of input files
+  if (( ${#INFILES[@]} == 0 )); then
+    echo "$PROG $COMMAND: Missing input files." >&2
+    _usage
+  fi
+  # Verify files exist before continuing to make user error like this less likely:
+  #   PROG -a p3 input.jpg output.jpg
+  # The user likely forgot -o before output.jpg
+  for ((i = 0; i < ${#INFILES[@]}; i++)); do
+    f=${INFILES[$i]}
+    if ! [[ -e "$f" ]]; then
+      echo "$f: file not found" >&2
+      exit 1
+    elif ! [[ -f "$f" ]]; then
+      echo "$f: not a file" >&2
+      exit 1
+    fi
+  done
+}
+
+function _use_OUTFILE {
+  if [ -n "$OUTFILE" ] && (( ${#INFILES[@]} > 1 )); then
+    echo "$PROG $COMMAND: -output can not be specified when there are multiple input files." >&2
+    _usage
+  fi
+}
+
+function _nouse_OUTPUT {
+  if [ -n "$OUTFILE" ]; then
+    echo "$PROG $COMMAND: invalid option -output" >&2
+    _usage
+  fi
+}
+
+function _use_TARGET_PROFILE {
+  TARGET_PROFILE=${INFILES[0]}
+  INFILES=("${INFILES[@]:1}")
+  TARGET_PROFILE_ICCFILE=$(_profile_to_icc_file $TARGET_PROFILE)
+  TARGET_PROFILE_ICCFILE_CHECKSUM=$(_sha256 "$TARGET_PROFILE_ICCFILE")
+  if ! TARGET_PROFILE_NAME=$(\
+    magick identify -format "%[icc:description]\n" "$TARGET_PROFILE_ICCFILE")
+  then
+    if ! TARGET_PROFILE_NAME=$(_canonical_profile_alias "$TARGET_PROFILE"); then
+      TARGET_PROFILE_NAME=$TARGET_PROFILE
+    fi
+  fi
+}
+
+# _iccfile_get_profile_name(iccfile, fallback_name)
+function _iccfile_get_profile_name {
+  local name
+  if name=$(magick identify -format "%[icc:description]\n" "$1"); then
+    echo $name
+  else
+    echo $2
+  fi
+}
+
+# function _ncpus {
+#   if which ncpus >/dev/null; then
+#     ncpus
+#   elif (sysctl -n hw.ncpu >/dev/null &2>1); then
+#     sysctl -n hw.ncpu
+#   fi
+#   echo "1"
+# }
+
+# _flog(file, msg...)
+# echo's msg with "$file: " prefix when there are multiple input files
+function _flog {
+  local f
+  f=$1 ; shift
+  # note: must be a single echo invocation to work with forked processes, or the $f part may
+  # appear interlaced with the message part from multiple _flog invocations.
+  if (( ${#INFILES[@]} > 1 )); then
+    echo "$f: $@"
+  else
+    echo "$@"
+  fi
+}
+
+function _get_profile_name {
+  local prof=$(magick identify -format "%[profiles]" "$1" 2>&1)
+  if [[ "$prof" == *"unknown image property"* ]]; then
+    return 1
+  fi
+  local ICC=$(magick identify -format "%[profile:icc]" "$1" 2>/dev/null)
+  if [[ "$ICC" == *"unknown image property"* ]]; then
+    echo "$prof" # e.g. "icc"
+  else
+    echo "$ICC" # e.g. "Display P3"
+  fi
+}
+
+# _profile_to_icc_file(alias) => "filename"
+function _profile_alias_to_icc_file {
+  shopt -s nocasematch  # case-insensitive alias match. i.e. sRGB==srgb==SRGB
+  for ((i = 0; i < ${#BUILTIN_PROFILES[@]}; i++)); do
+    if [[ "$1" == "$(_key "${BUILTIN_PROFILES[$i]}")" ]]; then
+      echo $(_value "${BUILTIN_PROFILES[$i]}")
+      return 0
+    fi
+  done
+  shopt -u nocasematch
+  return 1
+}
+
+# _canonical_profile_alias(alias) => "Alias"
+function _canonical_profile_alias {
+  shopt -s nocasematch  # case-insensitive alias match. i.e. sRGB==srgb==SRGB
+  for ((i = 0; i < ${#BUILTIN_PROFILES[@]}; i++)); do
+    local k=$(_key "${BUILTIN_PROFILES[$i]}")
+    if [[ "$1" == "$k" ]]; then
+      echo $k
+      return 0
+    fi
+  done
+  shopt -u nocasematch
+  return 1
+}
+
+# _profile_to_icc_file(file_or_alias) => "filename"
+function _profile_to_icc_file {
+  local f=$1
+  if ! [ -f "$f" ] && ! f=$(_profile_alias_to_icc_file "$f"); then
+    echo "$PROG: Invalid color profile '$1' (not a file nor an alias)" >&2
+    echo "Available built-in color profiles: $(_builtin_profile_names)"
+    exit 1
+  fi
+  echo "$f"
+}
+
+# _sha256(file) => "shasum"
+function _sha256 {
+  shasum -a 256 -b "$1" | cut -d ' ' -f 1
+}
+
+# _default_profile(file) => "profile alias"
+# Returns the default profile for a file. Fails if we can't be certain.
+function _default_profile {
+  shopt -s nocasematch
+  if [[ "$1" =~ (\.png)$ ]]; then
+    # The PNG standard defines that a PNG image without an explicit profile is defined in sRGB.
+    # Note: imagemagick never embeds the sRGB color profile into PNG images, even when asked to.
+    echo "srgb"
+    shopt -u nocasematch
+    return 0
+  fi
+  shopt -u nocasematch
+  return 1
+}
+
+# _compute_icc_checksum(image-file, image-file-checksum?) => "shasum"
+# Computes the checksum of the effective ICC profile of the input image file.
+function _compute_icc_checksum {
+  local profile
+  if ! profile=$(magick identify -format "%[profile:icc]" "$1" 2>/dev/null); then
+    return 1
+  fi
+  if [[ -n "$profile" ]]; then
+    local infilechecksum=$2
+    if [ -z $infilechecksum ]; then
+      infilechecksum=$(_sha256 "$1")
+    fi
+    # extract ICC profile from image and compute its checksum
+    local tmpfile=$CACHEDIR/$infilechecksum.icc
+    magick "$1" "$tmpfile"
+    _sha256 "$tmpfile"
+    rm -f "$tmpfile"
+  else
+    # No embedded profile. Read general color space which is usually computed by imagemagick,
+    # rather than stored in the file.
+    profile=$(magick identify -format "%[colorspace]" "$1")
+    # Attempt to map the named color space (e.g. "sRGB") as a built-in profile alias:
+    local iccfile
+    if iccfile=$(_profile_alias_to_icc_file "$profile"); then
+      _sha256 "$iccfile"
+    else
+      # all hope is lost. no checksum
+      echo "0"
+    fi
+  fi
+}
+
+# _get_icc_checksum(image-file) => "shasum"
+# Returns the checksum of the ICC profile embedded in the file, or the checksum of an implicit
+# profile
+function _get_icc_checksum {
+  local infilechecksum=$(_sha256 "$1")
+  local cachefile=$CACHEDIR/$infilechecksum.icc.checksum
+  # echo "[_get_icc_checksum] $1 (cachefile: $cachefile)" >&2
+  if ! [ -f "$cachefile" ]; then
+    local checksum
+    if ! checksum=$(_compute_icc_checksum "$1" "$infilechecksum"); then
+      echo "0"
+      return 1
+    fi
+    echo $checksum > "$cachefile"
+  fi
+  cat "$cachefile"
+}
+
+_builtin_srgb_checksum=
+function _get_builtin_srgb_checksum {
+  if [ -z "$_builtin_srgb_checksum" ]; then
+    _builtin_srgb_checksum=$(_sha256 "$(_profile_alias_to_icc_file sRGB)")
+  fi
+  echo $_builtin_srgb_checksum
+}
+
+
+# _foreach_infile(fn) calls "fn $f $fout" for every file in INFILES
+function _foreach_infile {
+  for ((i = 0; i < ${#INFILES[@]}; i++)); do
+    f=${INFILES[$i]}
+    fout=$f ; if [ -n "$OUTFILE" ]; then fout=$OUTFILE; fi
+    # run all but the last command in a background process/fork
+    if (( i+1 < ${#INFILES[@]} )); then
+      $1 "$f" "$fout" &
+    else
+      $1 "$f" "$fout"
+    fi
+  done
+}
+
+
+# ---- commands -----------------------------------------------------------------------------------
+
+function _cmd_help {
+  cat << _TXT_
+Inspect and convert color spaces & profiles in image files.
+Usage: $PROG <command> ...
+
+$PROG help
+  Show help message and exit
+
+$PROG info <file>... [-sha256]
+  Display color space & profile info.
+  If -sha256 is specified, the output changes to a tab-separated table:
+    filename<TAB>checksum<TAB>profilename
+  The checksum is computed from the ICC profile data in the files.
+  This can be compared with the checksum of a ICC file, e.g:
+    shasum -b -a 256 p3.icc
+
+$PROG assign <profile> <file>... [-output <file>]
+  Assign profile; reinterpret the color values in the image as being defined
+  in the specified profile's color space.
+
+$PROG convert <profile> <file>... [-output <file>]
+  Convert to color space and assign profile
+
+$PROG strip <file>... [-output <file>]
+  Remove any color profile(s). This may lead to unexpected results if the
+  implicit color space for the image format is different than the color space
+  that the image data is defined in. For example, a PNG without an ICC profile
+  is by the PNG standard implicitly defined in sRGB. If the source pixels are
+  actually meant to be for example P3, stripping the profile will make viewers
+  interpret the color values incorrectly.
+
+<file>
+  Any image file format that ImageMagick can handle.
+  To provide filenames that start with "-", terminate options with "--", e.g.
+    $PROG strip -- file1 -file2-with-hyphen file3
+
+<profile>
+  Either a path to an ICC file or a name of a builtin profile.
+  Named builtin profiles: $(_builtin_profile_names)
+
+-o|-output|--output <file>
+  Commands that modify files accept this option, which causes the result to be
+  written to the specified output file instead of the input file.
+_TXT_
+}
+
+function _cmd_help_implicit {
+  cat << _TXT_ >&2
+Usage: $PROG [info] <file>... [-sha256]
+   or: $PROG assign <profile> <file>... [-output <file>]
+   or: $PROG convert <profile> <file>... [-output <file>]
+   or: $PROG strip <file>... [-output <file>]
+   or: $PROG help
+See \`$PROG help\` for complete usage & documentation.
+_TXT_
+  exit 1
+}
+
+
+function _cmd_info1 { # (file)
+  local profile
+  if ! profile=$(magick identify -format "%[profile:icc]" "$1" 2>/dev/null); then
+    # Note: magick is a bit weird. it exits !=0 when parsing the file fails,
+    # but exits ==0 if the file is parsed but the identify command fails, i.e. if there
+    # is no profile:icc property, this command exists 0, not 1.
+    #
+    # Run it again to print to stderr and exit (since bash is in -e mode)
+    magick identify -format "%[profile:icc]" "$1"
+  fi
+  if [[ "$profile" == "" ]]; then
+    profile=$(magick identify -format "%[colorspace]" "$1")
+  fi
+  if $OPT_SHA256; then
+    local checksum=$(_get_icc_checksum "$1")
+    echo -e "$1\t$checksum\t$profile"
+  else
+    _flog "$1" "$profile"
+  fi
+}
+
+function _cmd_info {
+  _use_magick
+  _use_INFILES
+  _nouse_OUTPUT
+  _foreach_infile _cmd_info1
+}
+
+
+function _cmd_assign1 { # (infile, outfile)
+  # echo "curr_icc_checksum       $(_get_icc_checksum "$1")"
+  # echo "TARGET_PROFILE_ICCFILE_CHECKSUM $TARGET_PROFILE_ICCFILE_CHECKSUM"
+  local curr_icc_checksum
+  if ! curr_icc_checksum=$(_get_icc_checksum "$1"); then
+    # Run it again to print to stderr and exit (since bash is in -e mode)
+    magick identify -format "%[profile:icc]" "$1"
+  fi
+  if [[ "$curr_icc_checksum" == "$TARGET_PROFILE_ICCFILE_CHECKSUM" ]]; then
+    _flog "$1" "Already in color space $TARGET_PROFILE_NAME (no change)"
+    if [[ "$1" != "$2" ]]; then
+      cp -a "$1" "$2"
+    fi
+    return 0
+  fi
+
+  local curr_icc_profile=$(magick identify -format "%[profile:icc]" "$1" 2>/dev/null)
+  if [ -n "$curr_icc_profile" ]; then
+    # There is an existing ICC profile; strip before assigning.
+    # If we don't do this, then imagemagick will perform an implicit, potentially-destructive
+    # conversion from the existing profile to the OPT_ASSIGN profile.
+    magick "$f" +profile "*" -profile "$TARGET_PROFILE_ICCFILE" "$fout"
+    _flog "$f" "Assigned profile $TARGET_PROFILE_NAME (replaced $curr_icc_profile)"
+  else
+    # no existing ICC profile
+    magick "$f" -profile "$TARGET_PROFILE_ICCFILE" "$fout"
+    _flog "$f" "Assigned profile $TARGET_PROFILE_NAME"
+  fi
+}
+
+function _cmd_assign {
+  _use_magick
+  _use_TARGET_PROFILE
+  _use_INFILES
+  _use_OUTFILE
+  # echo "INFILES                ${INFILES[@]}"
+  # echo "TARGET_PROFILE         $TARGET_PROFILE"
+  # echo "TARGET_PROFILE_NAME    $TARGET_PROFILE_NAME"
+  # echo "TARGET_PROFILE_ICCFILE $TARGET_PROFILE_ICCFILE"
+  # echo "TARGET_PROFILE_ICCFILE_CHECKSUM $TARGET_PROFILE_ICCFILE_CHECKSUM"
+  _foreach_infile _cmd_assign1
+}
+
+
+function _cmd_convert1 {
+  if [[ "$(_get_icc_checksum "$1")" == "$TARGET_PROFILE_ICCFILE_CHECKSUM" ]]; then
+    _flog "$1" "Already in color space $TARGET_PROFILE_NAME (no change)"
+    if [[ "$1" != "$2" ]]; then
+      cp -a "$1" "$2"
+    fi
+    return 0
+  fi
+
+  local curr_icc_profile=$(magick identify -format "%[profile:icc]" "$1" 2>/dev/null)
+  if [ -n "$curr_icc_profile" ]; then
+    # Image has an existing ICC profile.
+    # In this case, imagemagick will perform a conversion from that profile to the
+    # ICC profile provided via -profile:
+    magick "$f" -profile "$TARGET_PROFILE_ICCFILE" "$fout"
+  else
+    # No ICC profile.
+    # In this case, imagemagick requires an explicit input profile to be specified or
+    # the effect is not a conversion but profile assignment (reinterpretation.)
+    profile=$(magick identify -format "%[colorspace]" "$1")
+    # Attempt to map the named color space (e.g. "sRGB") as a built-in profile alias:
+    local src_icc
+    if ! src_icc=$(_profile_alias_to_icc_file "$profile"); then
+      _flog "$f" "Unable to infer source profile. Assuming sRGB."
+      curr_icc_profile=sRGB
+      src_icc=$(_profile_alias_to_icc_file "$curr_icc_profile")
+    fi
+    curr_icc_profile=$(_iccfile_get_profile_name "$src_icc" "$curr_icc_profile")
+    magick "$f" -profile "$src_icc" -profile "$TARGET_PROFILE_ICCFILE" "$fout"
+  fi
+  _flog "$f" "Converted color space from $curr_icc_profile to $TARGET_PROFILE_NAME"
+}
+
+function _cmd_convert {
+  _use_magick
+  _use_TARGET_PROFILE
+  _use_INFILES
+  _use_OUTFILE
+  _foreach_infile _cmd_convert1
+}
+
+
+function _cmd_strip1 {
+  magick "$1" +profile "*" "$2"
+}
+
+function _cmd_strip {
+  _use_magick
+  _use_INFILES
+  _use_OUTFILE
+  _foreach_infile _cmd_strip1
+}
+
+# ---- main ---------------------------------------------------------------------------------------
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  help|-h|-help|--help)
+    COMMAND=help
+    shift
+    ;;
+  info|strip|assign|convert)
+    COMMAND=$1
+    shift
+    ;;
+  -o|-output|--output)
+    if [[ "$2" == "-"* ]]; then
+      echo "Missing value for option $1" >&2
+      _usage
+    fi
+    OUTFILE=$2
+    shift ; shift
+    ;;
+  -sha256|--sha256)
+    OPT_SHA256=true
+    shift
+    ;;
+  --)
+    shift
+    INFILES+=( "$@" )
+    break
+    ;;
+  -*)
+    echo "$PROG: Unknown command or option $1" >&2
+    _usage
+    shift
+    ;;
+  *)
+    INFILES+=( "$1" )
+    shift
+    ;;
+  esac
+done
+
+if [ -z "$COMMAND" ]; then
+  if (( ${#INFILES[@]} == 0 )); then
+    COMMAND=help_implicit
+  else
+    COMMAND=info
+  fi
+fi
+
+_cmd_$COMMAND
