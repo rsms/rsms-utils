@@ -4,6 +4,16 @@ const fs = require('fs')
 const childproc = require('child_process')
 const {basename, normalize, dirname} = require('path')
 
+// signals to try, in order, to shut down a process
+const killSignals = [
+  //'SIGINT',
+  'SIGTERM',
+  'SIGKILL',
+]
+
+// how long to wait for a process to exit after sending a signal before trying the next signal
+const killTimeout = 10000 //ms
+
 
 // terminal ANSI styling
 function termStyle(wstream, hint /* :bool|undefined */) {
@@ -134,52 +144,66 @@ const killproc = process.platform == 'win32' ? (proc, sig) => {
   process.kill(-proc.pid, sig)
 }
 
-function atexit(sig, code) {
-  if (runningProcesses.size > 0) {
-    for (let p of runningProcesses) {
-      killproc(p, 'SIGINT')
-    }
+process.on('exit', function (exitCode) {
+  for (let p of runningProcesses) {
+    killproc(p, 'SIGKILL')
+  }
+  runningProcesses.clear()
+  process.exitCode = exitCode
+})
+
+function shutdown(sig, exitCode) {
+  process.removeListener('SIGINT',  shutdown)
+  process.removeListener('SIGTERM', shutdown)
+  process.stdout.write("\n")
+  process.exitCode = exitCode
+  if (runningProcesses.size == 0) {
+    process.exit(0)
+  } else {
+    process.exitCode = exitCode
+    Promise.all(Array.from(runningProcesses).map(p => terminate(p))).then(exitCodes => {
+      const exitCode = exitCodes.reduce((a, c) => Math.min(Math.max(a, c)), 0)
+      process.stdout.write("\n")
+      process.exit(exitCode)
+    }).catch(err => {
+      console.error(err.stack || String(err))
+      process.exit(exitCode || 1)
+    })
     runningProcesses.clear()
   }
-  process.exit(code === undefined ? 0 : code)
 }
-process.on('SIGINT', atexit)
-process.on('SIGTERM', atexit)
-process.on('SIGHUP', atexit)
-process.on('exit', (code) => { atexit("EXIT", code) })
+process.on('SIGINT',  shutdown)
+process.on('SIGTERM', shutdown)
 
 // process state
 const NOT_STARTED = 0, RUNNING = 1, EXITED = 2
 
-function terminate(proc) { // :Promise<void>
+function terminate(proc) { // :Promise<exitCode:number>
   // console.log("\nTERMINATE\n")
   if (!proc || proc.state != RUNNING) {
     // console.log("\nTERMINATE A\n")
-    return Promise.resolve()
+    return Promise.resolve(0)
   }
   return new Promise((resolve, reject) => {
-    const signals = ['SIGINT', 'SIGTERM', 'SIGKILL']
-    const timeout = 500
-
     let signalIndex = 0
     let killTimer = null
     let timeoutReached = false
 
-    proc.once('exit', () => {
+    proc.once('exit', (exitCode) => {
       // console.log("\nTERMINATE exit\n")
       clearTimeout(killTimer)
       if (!timeoutReached) {
         // setTimeout(resolve, 1000)
-        resolve()
+        resolve(exitCode)
       }
     })
 
     let kill = function() {
-      let sig = signals[signalIndex++]
+      let sig = killSignals[signalIndex++]
       if (sig == undefined) {
         timeoutReached = true
         // console.log("\nTERMINATE timeout\n")
-        return reject(new Error('timeout'))
+        return reject(new Error(`timeout (${killTimeout})`))
       }
       // console.log(`\nTERMINATE kill sig=${sig}\n`)
 
@@ -187,7 +211,7 @@ function terminate(proc) { // :Promise<void>
       // proc.kill(sig)
 
       clearTimeout(killTimer)
-      killTimer = setTimeout(kill, timeout)
+      killTimer = setTimeout(kill, killTimeout)
     }
 
     kill()
