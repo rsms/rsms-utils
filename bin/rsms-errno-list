@@ -1,0 +1,4 @@
+#!/bin/sh
+
+[ -n "$CC" ] || CC=cc
+echo '#include <errno.h>' | $CC -dM -E - | grep -E '^#[[:space:]]*define[[:space:]]+E'
