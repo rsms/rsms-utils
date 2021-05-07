@@ -33,8 +33,7 @@ function _value { echo ${1#*:}; }
 
 function _builtin_profile_names {
   for ((i = 0; i < ${#BUILTIN_PROFILES[@]}; i++)); do
-    if ((i > 0)); then echo -n ", "; fi
-    echo "  $(_key "${BUILTIN_PROFILES[$i]}")"
+    echo "    $(_key "${BUILTIN_PROFILES[$i]}")"
   done
 }
 
@@ -145,13 +144,18 @@ function _iccfile_get_profile_name {
 function _flog {
   local f
   f=$1 ; shift
-  # note: must be a single echo invocation to work with forked processes, or the $f part may
-  # appear interlaced with the message part from multiple _flog invocations.
-  if (( ${#INFILES[@]} > 1 )); then
-    echo "$f: $@"
+  if [ -n "$OUTFILE" ]; then
+    echo "$f -> $OUTFILE: $@"
   else
-    echo "$@"
+    echo "$f: $@"
   fi
+  # # note: must be a single echo invocation to work with forked processes, or the $f part may
+  # # appear interlaced with the message part from multiple _flog invocations.
+  # if (( ${#INFILES[@]} > 1 )); then
+  #   echo "$f: $@"
+  # else
+  #   echo "$@"
+  # fi
 }
 
 function _get_profile_name {
@@ -332,6 +336,13 @@ $PROG strip <file>... [-output <file>]
   actually meant to be for example P3, stripping the profile will make viewers
   interpret the color values incorrectly.
 
+$PROG figma <file>...
+  Convenience command for:
+    $PROG assign p3 <file>...
+    for each <file>
+      $PROG convert srgb <file> -output <file>.srgb.ext
+
+
 <file>
   Any image file format that ImageMagick can handle.
   To provide filenames that start with "-", terminate options with "--", e.g.
@@ -339,7 +350,7 @@ $PROG strip <file>... [-output <file>]
 
 <profile>
   Either a path to an ICC file or a name of a builtin profile.
-  Named builtin profiles:
+  Named builtin profiles: (case insensitive)
 $(_builtin_profile_names)
 
 -o|-output|--output <file>
@@ -354,6 +365,7 @@ Usage: $PROG [info] <file>... [-sha256]
    or: $PROG assign <profile> <file>... [-output <file>]
    or: $PROG convert <profile> <file>... [-output <file>]
    or: $PROG strip <file>... [-output <file>]
+   or: $PROG figma <file>...
    or: $PROG help
 See \`$PROG help\` for complete usage & documentation.
 _TXT_
@@ -489,10 +501,18 @@ function _cmd_strip {
 
 # ---- main ---------------------------------------------------------------------------------------
 
+OPT_FIGMA=false
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
   help|-h|-help|--help)
     COMMAND=help
+    shift
+    ;;
+  figma)
+    OPT_FIGMA=true
+    COMMAND=assign
+    INFILES+=( p3 )
     shift
     ;;
   info|strip|assign|convert)
@@ -536,5 +556,25 @@ if [ -z "$COMMAND" ]; then
   fi
 fi
 
+# "figma" command does not support the -o flag
+if $OPT_FIGMA; then _nouse_OUTPUT; fi
+
 _cmd_$COMMAND
 wait
+
+if $OPT_FIGMA; then
+  # note: no need to drop "p3" added in case above from INFILES since
+  # _use_TARGET_PROFILE has removed it from INFILES already.
+  for ((i = 0; i < ${#INFILES[@]}; i++)); do
+    INFILE=${INFILES[$i]}    # e.g. foo/bar.png
+    INFILE_EXT=${INFILE##*.} # e.g. png
+    INFILE_STEM=${INFILE%.*} # e.g. foo/bar
+    OUTFILE=${INFILE_STEM}.srgb.${INFILE_EXT}
+    if [ "$OUTFILE" -nt "$INFILE" ]; then
+      echo "$OUTFILE up to date"
+    else
+      "$0" convert srgb -o "$OUTFILE" "$INFILE" &
+    fi
+  done
+  wait
+fi
