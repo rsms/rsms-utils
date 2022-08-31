@@ -1,0 +1,238 @@
+#!/bin/bash
+#
+# simple logbook aka journal aka work logger for lazy hoomans
+#
+set -e
+PROG=${0##*/}
+_err() { echo -e "$PROG:" "$@" >&2 ; exit 1; }
+
+_default_editor() {
+  if [ -z "$EDITOR" ]; then
+    command -v ed >/dev/null && EDITOR=ed
+    [ -z "$EDITOR" ] && command -v nano >/dev/null && EDITOR=nano
+    [ -z "$EDITOR" ] && command -v vi >/dev/null && EDITOR=vi
+    [ -z "$EDITOR" ] && _err "EDITOR is not set"
+  fi
+  case "$EDITOR" in
+    "subl "*|*"/subl "|subl|*"/subl")
+      # set cursor to end of file in sublime
+      case "$EDITOR" in
+        *"{}"*) ;;
+        *) EDITOR="$EDITOR \"{}:999999\"" ;;
+      esac
+      ;;
+  esac
+  echo $EDITOR
+}
+
+LOGFILE=
+LOGDIR=
+LOGDIR_NAME=${LOGBOOK_LOGDIR_NAME:-.logbook}
+DEFAULT_LOGDIR=${LOGBOOK_DEFAULT_LOGDIR:-~/$LOGDIR_NAME}
+LOGFILE_PATTERN=${LOGBOOK_LOGFILE_PATTERN:-"%Y-%m-%d.txt"}
+EDIT_CMD=${LOGBOOK_EDIT_CMD:-$(_default_editor)}
+USE_DEFAULT_LOGDIR=true
+UTC=false
+COMMAND=
+
+_need2() { [ -z "$2" ] && _err "missing value for $1"; }
+
+while [ $# -gt 0 ]; do case "$1" in
+  -h|-help|--help) cat << _END
+Simple journaling for lazy hoomans.
+Usage:
+  $PROG [options] [edit]            # Edit today's entry
+  $PROG [options] edit <entry>      # Edit specific entry
+  $PROG [options] a[dd] [--] <s>... # Append line <s>... to today's entry
+  $PROG [options] l[s]              # List entries
+  $PROG [options] logdir            # Print path of log directory
+  $PROG [options] logfile           # Print path of today's entry
+Options:
+  -C <dir>     Use <dir> as log directory (instead of searching for it.)
+  -f <file>    Use <file> as log entry (instead of automatically selecting one.)
+  -P <pattern> Set and override LOGBOOK_LOGFILE_PATTERN.
+  -E <cmd>     Set and override LOGBOOK_EDIT_CMD.
+  -D <dir>     Set and override LOGBOOK_DEFAULT_LOGDIR.
+  -utc         Use log-entry filenames based on UTC instead of local time.
+  -no-default  Do not fall back to LOGBOOK_DEFAULT_LOGDIR if log dir was not found.
+  -h, -help    Show help on stdout and exit.
+Environment variables:
+  LOGBOOK_LOGDIR_NAME ($LOGDIR_NAME)
+    Name of logbook directories
+  LOGBOOK_DEFAULT_LOGDIR (${DEFAULT_LOGDIR/$HOME/~})
+    Directory to use for log entires when logbook is invoked outside of a directory
+    with a LOGBOOK_LOGDIR_NAME directory.
+  LOGBOOK_LOGFILE_PATTERN ($LOGFILE_PATTERN)
+    Filename pattern to use for log files, passed to the "date" program.
+    See \`date --help\` for info on possible patterns.
+  LOGBOOK_EDIT_CMD ($EDIT_CMD)
+    Command invoked to edit a log entry. Substitutes "{}" for the log file,
+    or if "{}" is not found, passes the log file as first arg.
+Examples:
+  Edit today's entry:
+    $PROG
+  Append a line to today's entry:
+    $PROG add Bought cat food
+  Keep logs per week instead of per day:
+    export LOGBOOK_LOGFILE_PATTERN="%Y-week_%U.txt"
+  Edit logs in a macOS application:
+    export LOGBOOK_EDIT_CMD="open -a TextEdit"
+_END
+    exit ;;
+  -f)          _need2 "$@"; LOGFILE=$2; shift; shift ;;
+  -C)          _need2 "$@"; LOGDIR=$2; shift; shift ;;
+  -P)          _need2 "$@"; LOGBOOK_LOGFILE_PATTERN=$2 ; shift; shift ;;
+  -E)          _need2 "$@"; LOGBOOK_EDIT_CMD=$2 ; shift; shift ;;
+  -D)          _need2 "$@"; LOGBOOK_DEFAULT_LOGDIR=$2 ; shift; shift ;;
+  -utc)        UTC=true; shift ;;
+  -no-default) USE_DEFAULT_LOGDIR=false; shift ;;
+  --)          shift ; break ;;
+  -*)          _err "unknown option: $1" ;;
+  *)           [ -n "$COMMAND" ] && _err "unexpected extra argument: $1"
+               COMMAND=$1; shift ;;
+esac; done
+
+
+# extract file extension from LOGFILE_PATTERN
+FILEEXT=$(basename "$LOGFILE_PATTERN")
+FILEEXT=${FILEEXT##*.}
+[ -n "$FILEEXT" ] && FILEEXT=.$FILEEXT
+
+
+_find_logdir() {
+  LOGDIR=$PWD
+  while true; do
+    [ -z "$LOGDIR" -o -d "$LOGDIR/$LOGDIR_NAME" ] && break
+    LOGDIR=${LOGDIR%/*}  # shave off last path component
+  done
+  if [ -d "$LOGDIR/$LOGDIR_NAME" ]; then
+    LOGDIR=$LOGDIR/$LOGDIR_NAME
+  else
+    # expand tilde in DEFAULT_LOGDIR
+    case "$DEFAULT_LOGDIR" in
+      ~/*) DEFAULT_LOGDIR=${DEFAULT_LOGDIR/~/$HOME} ;;
+    esac
+    if $USE_DEFAULT_LOGDIR && [ -d "$DEFAULT_LOGDIR" ]; then
+      LOGDIR=$DEFAULT_LOGDIR
+    else
+      cat <<EOF >&2
+$PROG: No log directory found.
+I looked for a directory named "$LOGDIR_NAME" in the current directory and its parents.
+EOF
+      $USE_DEFAULT_LOGDIR &&
+        echo "(Default directory \"${DEFAULT_LOGDIR/$HOME/~}\" does not exist.)" >&2
+      exit 1
+    fi
+  fi
+}
+
+
+_logfile() {
+  local DATECMD=date
+  $UTC && DATECMD="$DATE_ARGS -u"
+  $DATECMD "+$LOGFILE_PATTERN"
+}
+
+
+_logfile_name() {
+  basename "$1" "$FILEEXT"
+}
+
+
+_cmd_ls() {
+  # determine TTY size
+  local TERMSIZE COLS
+  TERMSIZE=$(stty size 2>/dev/null || true)
+  if [ -n "$TERMSIZE" ]; then
+    #ROWS=${TERMSIZE% *}
+    COLS=${TERMSIZE#* }
+  fi
+  COLS=${COLS:-60}
+
+  local f excerpt excerptlen namelen name files
+
+  namelen=0
+  files=()
+  for f in "$LOGDIR"/*$FILEEXT; do
+    files+=( "$f" )
+    name=$(basename "$f" "$FILEEXT")
+    [ ${#name} -gt $namelen ] && namelen=${#name}
+  done
+
+  # max length of excerpt (-3 for 2 spaces + …)
+  excerptlen=$(expr $COLS - $namelen - 3)
+
+  for f in "${files[@]}"; do
+    name=$(basename "$f" "$FILEEXT")
+    excerpt=$(head -n3 "$f")
+    excerpt=${excerpt/
+/"↩ "}
+    if [ ${#excerpt} -ge $excerptlen ]; then
+      excerpt=$(echo "$excerpt" | head -c$excerptlen)"…"
+    fi
+    printf "%-*s  %s\n" $namelen "$name" "$excerpt"
+  done
+}
+
+
+_cmd_edit() {
+  [ -z "$2" ] || _err "unexpected extra argument: $2"
+  [ -n "$1" ] && LOGFILE=$LOGDIR/${1}$FILEEXT
+  case "$EDIT_CMD" in
+    *"{}"*)
+      EDIT_CMD=${EDIT_CMD/\{\}/"$LOGFILE"}
+      eval "exec $EDIT_CMD"
+      ;;
+    *)
+      exec $EDIT_CMD "$LOGFILE"
+      ;;
+  esac
+}
+
+
+_cmd_append() {
+  [ $# -gt 0 ] || _err "no message to append"
+  if [ $(tail -c1 "$LOGFILE"|wc -l) = "0" ]; then
+    # no newline at end
+    echo >> "$LOGFILE"
+  fi
+  echo "$@" >> "$LOGFILE"
+  echo "Added message to $(_logfile_name "$LOGFILE")"
+}
+
+
+_cmd_logdir() {
+  echo "$LOGDIR"
+}
+
+
+_cmd_logfile() {
+  echo "$LOGFILE"
+}
+
+
+# sort out LOGDIR and LOGFILE
+if [ -z "$LOGFILE" ]; then
+  [ -z "$LOGDIR" ] && _find_logdir
+  LOGFILE=$LOGDIR/$(_logfile)
+else
+  LOGDIR=$(dirname "$LOGFILE")
+fi
+[ -e "$LOGDIR" ] || _err "log directory \"$LOGDIR\" does not exist"
+[ -d "$LOGDIR" ] || _err "log directory \"$LOGDIR\" is not a directory"
+# echo "LOGFILE $LOGFILE"
+# echo "LOGDIR  $LOGDIR"
+
+# Create directories, in case LOGFILE_PATTERN contains subdirectories.
+# Note that _find_logdir already checked that LOGDIR exists.
+mkdir -pv "${LOGFILE%/*}"
+
+# call
+case "$COMMAND" in
+  e|ed|edit|"") _cmd_edit "$@" ;;
+  a|add|append) _cmd_append "$@" ;;
+  l|ls|list)    _cmd_ls   "$@" ;;
+  logfile)      _cmd_logfile   "$@" ;;
+  logdir)       _cmd_logdir   "$@" ;;
+  *)            _err "unrecognized command: $COMMAND" ;;
+esac
