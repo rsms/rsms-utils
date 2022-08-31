@@ -88,8 +88,7 @@ _END
   -no-default) USE_DEFAULT_LOGDIR=false; shift ;;
   --)          shift ; break ;;
   -*)          _err "unknown option: $1" ;;
-  *)           [ -n "$COMMAND" ] && _err "unexpected extra argument: $1"
-               COMMAND=$1; shift ;;
+  *)           [ -z "$COMMAND" ] || break; COMMAND=$1; shift ;;
 esac; done
 
 
@@ -140,6 +139,8 @@ _logfile_name() {
 
 
 _cmd_ls() {
+  [ -z "$1" ] || _err "unexpected extra argument: $1"
+
   # determine TTY size
   local TERMSIZE COLS
   TERMSIZE=$(stty size 2>/dev/null || true)
@@ -166,7 +167,7 @@ _cmd_ls() {
     name=$(basename "$f" "$FILEEXT")
     excerpt=$(head -n3 "$f")
     excerpt=${excerpt/
-/"↩ "}
+/" "}
     if [ ${#excerpt} -ge $excerptlen ]; then
       excerpt=$(echo "$excerpt" | head -c$excerptlen)"…"
     fi
@@ -202,11 +203,13 @@ _cmd_append() {
 
 
 _cmd_logdir() {
+  [ -z "$1" ] || _err "unexpected extra argument: $1"
   echo "$LOGDIR"
 }
 
 
 _cmd_logfile() {
+  [ -z "$1" ] || _err "unexpected extra argument: $1"
   echo "$LOGFILE"
 }
 
