@@ -247,7 +247,7 @@ _cmd_grep() {
       eval "exec $GREP_CMD $@"
       ;;
     *)
-      exec $GREP_CMD $@ .
+      exec $GREP_CMD $@ *$FILEEXT
       ;;
   esac
 }
