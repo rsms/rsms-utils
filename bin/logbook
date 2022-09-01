@@ -25,12 +25,22 @@ _default_editor() {
   echo $EDITOR
 }
 
+_default_reader() {
+  PAGER=${PAGER:-less}
+  if [ "$PAGER" = less ]; then
+    PAGER="$PAGER -I -K -s --tilde"
+  fi
+  echo "$PAGER"
+}
+
 LOGFILE=
 LOGDIR=
 LOGDIR_NAME=${LOGBOOK_LOGDIR_NAME:-.logbook}
 DEFAULT_LOGDIR=${LOGBOOK_DEFAULT_LOGDIR:-~/$LOGDIR_NAME}
 LOGFILE_PATTERN=${LOGBOOK_LOGFILE_PATTERN:-"%Y-%m-%d.txt"}
 EDIT_CMD=${LOGBOOK_EDIT_CMD:-$(_default_editor)}
+READ_CMD=${LOGBOOK_READ_CMD:-$(_default_reader)}
+GREP_CMD=${LOGBOOK_GREP_CMD:-grep -i -R -F --color}
 USE_DEFAULT_LOGDIR=true
 UTC=false
 COMMAND=
@@ -38,15 +48,17 @@ COMMAND=
 _need2() { [ -z "$2" ] && _err "missing value for $1"; }
 
 while [ $# -gt 0 ]; do case "$1" in
-  -h|-help|--help) cat << _END
+  -h|-help|--help|help) cat << _END
 Simple journaling for lazy hoomans.
 Usage:
-  $PROG [options] [edit]            # Edit today's entry
-  $PROG [options] edit <entry>      # Edit specific entry
-  $PROG [options] a[dd] [--] <s>... # Append line <s>... to today's entry
-  $PROG [options] l[s]              # List entries
-  $PROG [options] logdir            # Print path of log directory
-  $PROG [options] logfile           # Print path of today's entry
+  $PROG [options] [edit]             # Edit today's entry
+  $PROG [options] edit [<entry>]     # Edit today's entry or specific entry
+  $PROG [options] read [<entry>]     # Read today's entry or specific entry
+  $PROG [options] add [--] <s>...    # Append line <s>... to today's entry
+  $PROG [options] ls                 # List entries
+  $PROG [options] grep <greparg>...  # Search entries
+  $PROG [options] logdir             # Print path of log directory
+  $PROG [options] logfile            # Print path of today's entry
 Options:
   -C <dir>     Use <dir> as log directory (instead of searching for it.)
   -f <file>    Use <file> as log entry (instead of automatically selecting one.)
@@ -60,14 +72,20 @@ Environment variables:
   LOGBOOK_LOGDIR_NAME ($LOGDIR_NAME)
     Name of logbook directories
   LOGBOOK_DEFAULT_LOGDIR (${DEFAULT_LOGDIR/$HOME/~})
-    Directory to use for log entires when logbook is invoked outside of a directory
-    with a LOGBOOK_LOGDIR_NAME directory.
+    Directory to use for log entires when logbook is invoked outside of
+    a directory with a LOGBOOK_LOGDIR_NAME directory.
   LOGBOOK_LOGFILE_PATTERN ($LOGFILE_PATTERN)
     Filename pattern to use for log files, passed to the "date" program.
     See \`date --help\` for info on possible patterns.
   LOGBOOK_EDIT_CMD ($EDIT_CMD)
-    Command invoked to edit a log entry. Substitutes "{}" for the log file,
-    or if "{}" is not found, passes the log file as first arg.
+    Command invoked to edit a log entry. Substitutes "{}" for the log file.
+    If "{}" is not present, passes the log file as an argument.
+  LOGBOOK_READ_CMD ($READ_CMD)
+    Command invoked to read a log entry. Substitutes "{}" for the log file.
+    If "{}" is not present, passes the log file as an argument.
+  LOGBOOK_GREP_CMD ($GREP_CMD)
+    Command invoked to search a log directory. Substitutes "{}" for the log
+    directory. Runs in the log directory as working directory.
 Examples:
   Edit today's entry:
     $PROG
@@ -88,7 +106,11 @@ _END
   -no-default) USE_DEFAULT_LOGDIR=false; shift ;;
   --)          shift ; break ;;
   -*)          _err "unknown option: $1" ;;
-  *)           [ -z "$COMMAND" ] || break; COMMAND=$1; shift ;;
+  *)
+    [ -z "$COMMAND" ] || break
+    COMMAND=$1; shift
+    [ "$COMMAND" = grep ] && break
+    ;;
 esac; done
 
 
@@ -191,6 +213,46 @@ _cmd_edit() {
 }
 
 
+_cmd_read() {
+  [ -z "$2" ] || _err "unexpected extra argument: $2"
+  [ -n "$1" ] && LOGFILE=$LOGDIR/${1}$FILEEXT
+
+  local NAME=$(basename "$(dirname "$LOGDIR")")
+  [ -n "$NAME" ] && NAME=$NAME/
+  NAME=$NAME$(_logfile_name "$LOGFILE")
+
+  local ARGS=()
+  case "$READ_CMD" in
+    "less "*|*"/less "|less|*"/less")
+      ARGS+=( "-Ps$NAME" ) ;;
+  esac
+
+  case "$READ_CMD" in
+    *"{}"*)
+      READ_CMD=${READ_CMD/\{\}/"$LOGFILE"}
+      eval "exec $READ_CMD ${ARGS[@]}"
+      ;;
+    *)
+      exec $READ_CMD "${ARGS[@]}" "$LOGFILE"
+      ;;
+  esac
+}
+
+
+_cmd_grep() {
+  cd "$LOGDIR"
+  case "$GREP_CMD" in
+    *"{}"*)
+      GREP_CMD=${GREP_CMD/\{\}/"$LOGDIR"}
+      eval "exec $GREP_CMD $@"
+      ;;
+    *)
+      exec $GREP_CMD $@ .
+      ;;
+  esac
+}
+
+
 _cmd_append() {
   [ $# -gt 0 ] || _err "no message to append"
   if [ $(tail -c1 "$LOGFILE"|wc -l) = "0" ]; then
@@ -232,10 +294,12 @@ mkdir -pv "${LOGFILE%/*}"
 
 # call
 case "$COMMAND" in
-  e|ed|edit|"") _cmd_edit "$@" ;;
-  a|add|append) _cmd_append "$@" ;;
-  l|ls|list)    _cmd_ls   "$@" ;;
-  logfile)      _cmd_logfile   "$@" ;;
-  logdir)       _cmd_logdir   "$@" ;;
-  *)            _err "unrecognized command: $COMMAND" ;;
+  e|ed|edit|"")  _cmd_edit "$@" ;;
+  a|add|append)  _cmd_append "$@" ;;
+  l|ls|list)     _cmd_ls "$@" ;;
+  r|read|cat)    _cmd_read "$@" ;;
+  g|grep|search) _cmd_grep "$@" ;;
+  logfile)       _cmd_logfile "$@" ;;
+  logdir)        _cmd_logdir "$@" ;;
+  *)             _err "unrecognized command: $COMMAND" ;;
 esac
