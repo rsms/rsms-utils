@@ -1,0 +1,225 @@
+#!/bin/bash
+set -e
+PROG=${0##*/}
+_err() { echo -e "$PROG:" "$@" >&2 ; exit 1; }
+
+while [ $# -gt 0 ]; do case "$1" in
+  -h|-help|--help) cat << _END
+Print list of libc error codes ("errno")
+Usage: $PROG [options] [--] [<code>|<regexp>]
+Options:
+  -h, -help   Show help and exit
+Environment variables:
+  CC  Compiler to query for location of errno.h. Defaults to "cc".
+Examples:
+  Look up error code 4:
+    $PROG 4
+  List all errors containing "4":
+    $PROG 4.
+  List all errors related to files:
+    $PROG file
+  List all errors with codes in the range 20-29:
+    $PROG '^ 2'
+_END
+    exit ;;
+  --) shift; break ;;
+  -*) _err "unknown option: $1" ;;
+  *)  break ;;
+esac; done
+
+REGEXP=$1
+
+descr__EPERM="Operation not permitted"
+descr__ENOENT="No such file or directory"
+descr__ESRCH="No such process"
+descr__EINTR="Interrupted system call"
+descr__EIO="Input/output error"
+descr__ENXIO="No such device or address"
+descr__E2BIG="Argument list too long"
+descr__ENOEXEC="Exec format error"
+descr__EBADF="Bad file descriptor"
+descr__ECHILD="No child processes"
+descr__EDEADLK="Resource deadlock avoided"
+descr__ENOMEM="Cannot allocate memory"
+descr__EACCES="Permission denied"
+descr__EFAULT="Bad address"
+descr__ENOTBLK="Block device required"
+descr__EBUSY="Device or resource busy"
+descr__EEXIST="File exists"
+descr__EXDEV="Invalid cross-device link"
+descr__ENODEV="No such device"
+descr__ENOTDIR="Not a directory"
+descr__EISDIR="Is a directory"
+descr__EINVAL="Invalid argument"
+descr__EMFILE="Too many open files"
+descr__ENFILE="Too many open files in system"
+descr__ENOTTY="Inappropriate ioctl for device"
+descr__ETXTBSY="Text file busy"
+descr__EFBIG="File too large"
+descr__ENOSPC="No space left on device"
+descr__ESPIPE="Illegal seek"
+descr__EROFS="Read-only file system"
+descr__EMLINK="Too many links"
+descr__EPIPE="Broken pipe"
+descr__EDOM="Numerical argument out of domain"
+descr__ERANGE="Numerical result out of range"
+descr__EAGAIN="Resource temporarily unavailable"
+descr__EWOULDBLOCK="Operation would block"
+descr__EINPROGRESS="Operation now in progress"
+descr__EALREADY="Operation already in progress"
+descr__ENOTSOCK="Socket operation on non-socket"
+descr__EMSGSIZE="Message too long"
+descr__EPROTOTYPE="Protocol wrong type for socket"
+descr__ENOPROTOOPT="Protocol not available"
+descr__EPROTONOSUPPORT="Protocol not supported"
+descr__ESOCKTNOSUPPORT="Socket type not supported"
+descr__EOPNOTSUPP="Operation not supported"
+descr__EPFNOSUPPORT="Protocol family not supported"
+descr__EAFNOSUPPORT="Address family not supported by protocol"
+descr__EADDRINUSE="Address already in use"
+descr__EADDRNOTAVAIL="Cannot assign requested address"
+descr__ENETDOWN="Network is down"
+descr__ENETUNREACH="Network is unreachable"
+descr__ENETRESET="Network dropped connection on reset"
+descr__ECONNABORTED="Software caused connection abort"
+descr__ECONNRESET="Connection reset by peer"
+descr__ENOBUFS="No buffer space available"
+descr__EISCONN="Transport endpoint is already connected"
+descr__ENOTCONN="Transport endpoint is not connected"
+descr__EDESTADDRREQ="Destination address required"
+descr__ESHUTDOWN="Cannot send after transport endpoint shutdown"
+descr__ETOOMANYREFS="Too many references: cannot splice"
+descr__ETIMEDOUT="Connection timed out"
+descr__ECONNREFUSED="Connection refused"
+descr__ELOOP="Too many levels of symbolic links"
+descr__ENAMETOOLONG="File name too long"
+descr__EHOSTDOWN="Host is down"
+descr__EHOSTUNREACH="No route to host"
+descr__ENOTEMPTY="Directory not empty"
+descr__EPROCLIM="Too many processes"
+descr__EUSERS="Too many users"
+descr__EDQUOT="Disk quota exceeded"
+descr__ESTALE="Stale file handle"
+descr__EREMOTE="Object is remote"
+descr__EBADRPC="RPC struct is bad"
+descr__ERPCMISMATCH="RPC version wrong"
+descr__EPROGUNAVAIL="RPC program not available"
+descr__EPROGMISMATCH="RPC program version wrong"
+descr__EPROCUNAVAIL="RPC bad procedure for program"
+descr__ENOLCK="No locks available"
+descr__EFTYPE="Inappropriate file type or format"
+descr__EAUTH="Authentication error"
+descr__ENEEDAUTH="Need authenticator"
+descr__ENOSYS="Function not implemented"
+descr__ENOTSUP="Not supported"
+descr__EILSEQ="Invalid or incomplete multibyte or wide character"
+descr__EBACKGROUND="Inappropriate operation for background process"
+descr__EDIED="Translator died"
+descr__EGREGIOUS="You really blew it this time"
+descr__EIEIO="Computer bought the farm"
+descr__EGRATUITOUS="Gratuitous error"
+descr__EBADMSG="Bad message"
+descr__EIDRM="Identifier removed"
+descr__EMULTIHOP="Multihop attempted"
+descr__ENODATA="No data available"
+descr__ENOLINK="Link has been severed"
+descr__ENOMSG="No message of desired type"
+descr__ENOSR="Out of streams resources"
+descr__ENOSTR="Device not a stream"
+descr__EOVERFLOW="Value too large for defined data type"
+descr__EPROTO="Protocol error"
+descr__ETIME="Timer expired"
+descr__ECANCELED="Operation canceled"
+descr__EOWNERDEAD="Owner died"
+descr__ENOTRECOVERABLE="State not recoverable"
+descr__ERESTART="Interrupted system call should be restarted"
+descr__ECHRNG="Channel number out of range"
+descr__EL2NSYNC="Level 2 not synchronized"
+descr__EL3HLT="Level 3 halted"
+descr__EL3RST="Level 3 reset"
+descr__ELNRNG="Link number out of range"
+descr__EUNATCH="Protocol driver not attached"
+descr__ENOCSI="No CSI structure available"
+descr__EL2HLT="Level 2 halted"
+descr__EBADE="Invalid exchange"
+descr__EBADR="Invalid request descriptor"
+descr__EXFULL="Exchange full"
+descr__ENOANO="No anode"
+descr__EBADRQC="Invalid request code"
+descr__EBADSLT="Invalid slot"
+descr__EDEADLOCK="File locking deadlock error"
+descr__EBFONT="Bad font file format"
+descr__ENONET="Machine is not on the network"
+descr__ENOPKG="Package not installed"
+descr__EADV="Advertise error"
+descr__ESRMNT="Srmount error"
+descr__ECOMM="Communication error on send"
+descr__EDOTDOT="RFS specific error"
+descr__ENOTUNIQ="Name not unique on network"
+descr__EBADFD="File descriptor in bad state"
+descr__EREMCHG="Remote address changed"
+descr__ELIBACC="Can not access a needed shared library"
+descr__ELIBBAD="Accessing a corrupted shared library"
+descr__ELIBSCN=".lib section in a.out corrupted"
+descr__ELIBMAX="Attempting to link in too many shared libraries"
+descr__ELIBEXEC="Cannot exec a shared library directly"
+descr__ESTRPIPE="Streams pipe error"
+descr__EUCLEAN="Structure needs cleaning"
+descr__ENOTNAM="Not a XENIX named type file"
+descr__ENAVAIL="No XENIX semaphores available"
+descr__EISNAM="Is a named type file"
+descr__EREMOTEIO="Remote I/O error"
+descr__ENOMEDIUM="No medium found"
+descr__EMEDIUMTYPE="Wrong medium type"
+descr__ENOKEY="Required key not available"
+descr__EKEYEXPIRED="Key has expired"
+descr__EKEYREVOKED="Key has been revoked"
+descr__EKEYREJECTED="Key was rejected by service"
+descr__ERFKILL="Operation not possible due to RF-kill"
+descr__EHWPOISON="Memory page has hardware error"
+
+MAX_NAME_LEN=15 # longest errno name
+
+CL_CODE="\e[33;1m"
+CL_ALIAS="\e[36;1m"
+CL_NAME="\e[1m"
+CL_RESET="\e[0m"
+if ! [ -t 1 ]; then  # stdout is not a TTY; don't use ANSI codes
+  CL_CODE=
+  CL_ALIAS=
+  CL_NAME=
+  CL_RESET=
+fi
+
+FILTERCMD=(cat)
+if [ $# -gt 0 ]; then
+  # has filter
+  if [[ "$@" =~ ^[0-9]+$ ]] ; then
+    # filter is for error code
+    FILTERCMD=(grep -E "^\s*$@\s")
+  else
+    FILTERCMD=(grep -i -E --color=auto -- "$@")
+  fi
+  echo "FILTERCMD ${FILTERCMD[@]}"
+fi
+
+echo '#include <errno.h>' |
+  ${CC:-cc} -dM -E - |
+  grep -E '^#[[:space:]]*define[[:space:]]+E' |
+  cut -d' ' -f2,3 |
+  while read -r name code; do
+    descr=descr__$name
+    [ -z "$descr" ] && ! [[ "$code" =~ ^[0-9]+$ ]] && descr=descr__$code
+    printf "%3s\t%s\t%s\n" "$code" "$name" "${!descr:-"-"}"
+  done |
+  "${FILTERCMD[@]}" |
+  while IFS=$'\t' read -r code name descr; do
+    if ! [[ $code =~ ^[[:space:]]*[0-9]+$ ]] ; then
+      # alias, e.g. "#define EWOULDBLOCK EAGAIN"
+      printf "    ${CL_NAME}%s${CL_RESET}=${CL_NAME}%s${CL_RESET}\t%s\n" \
+        "$name" "$code" "$descr"
+    else
+      printf "${CL_CODE}%3s${CL_RESET} ${CL_NAME}%-*s${CL_RESET}\t%s\n" \
+        "$code" $MAX_NAME_LEN "$name" "$descr"
+    fi
+  done
