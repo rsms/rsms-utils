@@ -5,7 +5,7 @@ _err() { echo -e "$PROG:" "$@" >&2 ; exit 1; }
 
 while [ $# -gt 0 ]; do case "$1" in
   -h|-help|--help) cat << _END
-Print list of libc error codes ("errno")
+List & search libc error codes along with description.
 Usage: $PROG [options] [--] [<code>|<regexp>]
 Options:
   -h, -help   Show help and exit
