@@ -38,16 +38,3 @@ For example, if you are designing in P3 in Figma and export a PNG, the resulting
   <img src="image.srgb.png" alt="Drawing of a cat">
 </picture>
 ```
-
-
-## autorun
-
-Manage program processes based on file changes.
-
-This simple program makes it easy to have programs run automatically
-as you are writing them; the practical use-cases are many more.
-
-E.g. `autorun foo.js node : -test` spawns a process running `node` with the
-arguments `foo.js`, `-test`. Whenever `foo.js` changes, any running process is
-first terminated and then a new one is spawned. If the file's name changed,
-the newly spawned process'es arguments will contain the new filename.
