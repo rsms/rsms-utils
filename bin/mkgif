@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-PROG=$(basename "$0")
+PROG=${0##*/}
 pushd "$(dirname "$0")/.." >/dev/null
 popd >/dev/null
 
@@ -16,7 +16,7 @@ DITHER=false
 while [[ $# -gt 0 ]]; do case "$1" in
   -h|-help|--help) cat << EOF
 Make a GIF from a video
-usage: $0 [options] <videofile>
+usage: $PROG [options] <videofile>
 options:
   -fps=FPS      Set FPS limit. Default: $FPS
   -size=SIZE    Set size limit. Default: $MAXSIZE
@@ -26,7 +26,7 @@ options:
                 Write output to FILE instead of <videofile>.gif
   -h, -help     Print help on stdout and exit
 EOF
-    exit 0 ;;
+    exit ;;
   -fps=*)     FPS=${1:5}; shift ;;
   -size=*)    MAXSIZE=${1:6}; shift ;;
   -colors=*)  MAXCOLORS=${1:8}; shift ;;
