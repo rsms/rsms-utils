@@ -42,11 +42,11 @@ OUTFILE=${OUTFILE:-$INFILE.gif}
 rm -rf "$OUTFILE"
 
 FFMPEG_VF="fps=$FPS"
-#FFMPEG_VF="${FFMPEG_VF},format=rgb24"
+# FFMPEG_VF="${FFMPEG_VF},format=rgb24"
 # FFMPEG_VF="${FFMPEG_VF},colorspace=all=bt709:trc=srgb:format=yuv420p"
 FFMPEG_VF="${FFMPEG_VF},scale=$MAXSIZE:-1:flags=lanczos"
-FFMPEG_VF="${FFMPEG_VF},pp=al" # fix whites, see ffmpeg.org/ffmpeg-filters.html#pp
-FFMPEG_VF="${FFMPEG_VF},split[s0][s1];[s0]palettegen=stats_mode=diff:max_colors=$MAXCOLORS[p]"
+# FFMPEG_VF="${FFMPEG_VF},pp=al" # fix whites, see ffmpeg.org/ffmpeg-filters.html#pp
+FFMPEG_VF="${FFMPEG_VF},split[s0][s1];[s0]palettegen=stats_mode=full:max_colors=$MAXCOLORS[p]"
 
 if $DITHER; then
   FFMPEG_VF="${FFMPEG_VF};[s1][p]paletteuse=dither=bayer"
