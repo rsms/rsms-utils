@@ -1,0 +1,99 @@
+#!/bin/sh
+set -euo pipefail
+PROG=$(basename "$0")
+_err() { echo "$PROG:" "$@" >&2; exit 1; }
+_needarg() { [ $# -gt 1 ] || _err "missing <outfile> for $1"; }
+_needcmd() { # <cmd> [<help>]
+  local help=${2:-}; [ -z "$help" ] || help=". $help"
+  command -v $1 >/dev/null || _err "$1 not found in PATH$help"
+}
+
+DATA_DIR=`cd $(dirname "$0"); cd ..; pwd`/data
+INFILE=
+INFORMAT=
+OUTFILE=
+OUTFORMAT=
+CROP=1
+
+while [[ $# -gt 0 ]]; do case "$1" in
+  -h|-help|--help) cat << _END
+Convert .ps, .eps and .pdf files to .svg or .pdf
+Usage: $PROG [options] [--] <infile>
+  -o <outfile>  Write output to <outfile> instead of <infile>.svg
+  -f <format>   Output format. Either pdf or svg (default: svg)
+  --no-crop     Do not crop to bounding box
+  -vv           Very verbose mode
+  -h, --help    Show help on stdout and exit
+Examples:
+  Convert EPS file foo.eps to foo.svg:
+    $PROG foo.eps
+  Convert EPS file foo.eps to bar.pdf:
+    $PROG foo.eps -o bar.pdf
+_END
+    exit ;;
+  -o=*)        OUTFILE=${1:3}; shift;;
+  --output=*)  OUTFILE=${1:9}; shift;;
+  -o|--output) _needarg $@; OUTFILE=$2; shift;shift;;
+  -f=*)        OUTFORMAT=${1:3}; shift;;
+  -f)          _needarg $@; OUTFORMAT=$2; shift;shift;;
+  --no-crop)   CROP=; shift;;
+  -p3|--p3)    P3=1; shift;;
+  -v|-vv)      shift; set -x;;
+  --)
+    [ $# -gt 2 ] && _err "extranous <infile>"
+    [ $# -eq 2 ] || _err "missing <infile>"
+    INFILE=$2
+    break ;;
+  -*)
+    _err "unknown option: $1" ;;
+  *)
+    [ -z "$INFILE" ] || _err "extranous <infile>"
+    INFILE=$1
+    shift ;;
+esac; done
+
+[ -n "$INFILE" ] || _err "missing <infile> (see $PROG --help)"
+[ -n "$OUTFILE" ] || OUTFILE=${INFILE%.*}.${OUTFORMAT:-svg}
+
+[ -z "$OUTFORMAT" ] && case "$OUTFILE" in
+  *.pdf) OUTFORMAT=pdf ;;
+  *.svg) OUTFORMAT=svg ;;
+  *) _err "$(basename "$OUTFILE"): can't guess output format from filename extension"
+esac
+[ "$OUTFORMAT" = pdf -o "$OUTFORMAT" = svg ] ||
+  _err "invalid output format: $OUTFORMAT"
+
+case "$INFILE" in
+  *.pdf) INFORMAT=pdf ;;
+  *.ps)  INFORMAT=ps ;;
+  *.eps) INFORMAT=eps ;;
+  *) _err "$(basename "$INFILE"): can't guess input format from filename extension"
+esac
+
+PDFFILE=
+if [ "$INFORMAT" = pdf ]; then
+  [ "$OUTFORMAT" = pdf ] && exec cp -f "$INFILE" "$OUTFILE"
+  PDFFILE="$INFILE"
+elif [ "$OUTFORMAT" = pdf ]; then
+  PDFFILE="$OUTFILE"
+else
+  PDFFILE=${TMPDIR:-/tmp}/$PROG.$$.pdf
+  trap "rm -f '$PDFFILE'" EXIT
+  trap "rm -f '$PDFFILE'" INT
+fi
+
+if [ "$PDFFILE" != "$INFILE" ]; then
+  _needcmd ps2pdf "Try: brew install ghostscript"
+  # ps2pdf can handle .ps and .eps inputs
+  # https://ghostscript.com/docs/9.54.0/Use.htm
+  # -sOutputICCProfile=...  # doesn't work with -dEPSCrop ?
+  ps2pdf \
+    -sDefaultRGBProfile="$DATA_DIR/srgb.icc" \
+    ${CROP/1/-dEPSCrop} \
+    "$INFILE" "$PDFFILE"
+fi
+
+if [ "$PDFFILE" != "$OUTFILE" ]; then
+  _needcmd pdf2svg "Try: brew install pdf2svg"
+  pdf2svg "$PDFFILE" "$OUTFILE"
+fi
