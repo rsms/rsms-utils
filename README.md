@@ -4,7 +4,7 @@ Collection of command-line programs to help with everyday computer life.
 
 - [autorun](bin/autorun) — Run a command when some files changes
 - [color-space](bin/color-space) — Inspect and convert color spaces of images
-- [logbook](bin/logbook) — Manage a simle journal per project
+- [logbook](bin/logbook) — Manage a simple journal per project
 - [lserrno](bin/lserrno) — List & search libc error codes along with description
 - [mkgif](bin/mkgif) — Creates an animated GIF from a video file
 
