@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 STATE_FILENAME = ".agent-worklog-state.json"
 LOG_FILENAME = ".agent-worklog.jsonl"
+INITIAL_LOOKBACK_MINUTES = 10
 
 
 def run_git(args: List[str], cwd: Optional[pathlib.Path] = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -369,12 +370,15 @@ def main(argv: List[str]) -> int:
         append_local_announcements(log_file, args.announcements, branch)
 
     state_file = git_dir / STATE_FILENAME
+    state_file_missing = not state_file.is_file()
     state_since, state_since_count = load_state_since(state_file)
     effective_since = args.since_dt
     effective_since_count = 0
     if effective_since is None and state_since is not None:
         effective_since = state_since
         effective_since_count = state_since_count
+    elif effective_since is None and state_file_missing:
+        effective_since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=INITIAL_LOOKBACK_MINUTES)
 
     from_agents = normalize_from_agents(args.from_agents)
     updates, newest_ts, newest_ts_count = read_other_agents(

@@ -14,6 +14,7 @@ Patterns to add to your gitignore:
 
 - `.agent-worklog.jsonl` contains the actual log data. This file and the related .lock file are stored only in the main checkout of the repo, not in worktrees.
 - `.agent-worklog-state.json` contains the current "last timestamp read" info and is stored per worktree. It is intentionally "lost" when a worktree is deleted.
+- If `.agent-worklog-state.json` is missing, reads default to the last 10 minutes instead of the full log.
 
 ## AGENTS.md template
 
@@ -45,4 +46,3 @@ Reacting to important updates:
 - Integration options include: `git stash` + merge/rebase + `git stash pop`, committing your WIP and then merging/rebasing, or another safe git workflow.
 - If another agent reports they merged, update your branch from `main` promptly (`git merge main` or `git rebase main`) to pick up those changes.
 ```
-
