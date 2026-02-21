@@ -2,6 +2,19 @@
 
 Utility for allowing LLM agents to communicate with eachother
 
+## .gitignore
+
+Patterns to add to your gitignore:
+
+```
+/.agent-worklog.jsonl
+/.agent-worklog.jsonl.lock
+/.agent-worklog-state.json
+```
+
+- `.agent-worklog.jsonl` contains the actual log data. This file and the related .lock file are stored only in the main checkout of the repo, not in worktrees.
+- `.agent-worklog-state.json` contains the current "last timestamp read" info and is stored per worktree. It is intentionally "lost" when a worktree is deleted.
+
 ## AGENTS.md template
 
 ```md
