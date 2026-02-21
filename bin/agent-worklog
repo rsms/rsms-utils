@@ -27,13 +27,13 @@ def run_git(args: List[str], cwd: Optional[pathlib.Path] = None, check: bool = T
 
 
 def detect_repo_root(cwd: pathlib.Path) -> pathlib.Path:
-    p = run_git(["rev-parse", "--show-toplevel"], cwd=cwd, check=False)
+    p = run_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd, check=False)
     if p.returncode != 0:
         return cwd
     out = p.stdout.strip()
     if not out:
         return cwd
-    return pathlib.Path(out).resolve()
+    return pathlib.Path(out).resolve().parent
 
 
 def detect_git_dir(cwd: pathlib.Path) -> pathlib.Path:
@@ -84,6 +84,7 @@ def parse_cli(argv: List[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Append local worklog announcements and read updates from a shared agent log."
     )
+    p.add_argument("--print-db-path", action="store_true", help="Print absolute path to the shared .agent-worklog.jsonl file and exit.")
     p.add_argument("--peek", action="store_true", help="Read updates without advancing the last-read timestamp.")
     p.add_argument("--since", metavar="TIMESTAMP", help="Read all messages since ISO timestamp (e.g. 2026-02-21T20:00:00Z).")
     p.add_argument(
@@ -121,11 +122,11 @@ def normalize_announcement(raw: str, from_branch: str) -> Dict[str, object]:
         obj = json.loads(raw)
         if not isinstance(obj, dict):
             raise ValueError("announcement must be a JSON object")
+        obj["from"] = from_branch
     except Exception:
-        obj = {"message": raw}
+        obj = {"from": from_branch, "message": raw}
     if "timestamp" not in obj and "ts" not in obj:
         obj["timestamp"] = now_iso_utc()
-    obj["from"] = from_branch
     return obj
 
 
@@ -357,11 +358,17 @@ def main(argv: List[str]) -> int:
     repo_root = detect_repo_root(cwd)
     git_dir = detect_git_dir(cwd)
     branch = detect_branch(cwd)
+    log_file = repo_root / LOG_FILENAME
+
+    if args.print_db_path:
+        sys.stdout.write(str(log_file))
+        sys.stdout.write("\n")
+        return 0
 
     if args.announcements:
-        append_local_announcements(git_dir / LOG_FILENAME, args.announcements, branch)
+        append_local_announcements(log_file, args.announcements, branch)
 
-    state_file = repo_root / STATE_FILENAME
+    state_file = git_dir / STATE_FILENAME
     state_since, state_since_count = load_state_since(state_file)
     effective_since = args.since_dt
     effective_since_count = 0
@@ -371,7 +378,7 @@ def main(argv: List[str]) -> int:
 
     from_agents = normalize_from_agents(args.from_agents)
     updates, newest_ts, newest_ts_count = read_other_agents(
-        git_dir / LOG_FILENAME,
+        log_file,
         current_agent=branch,
         from_agents=from_agents,
         since_dt=effective_since,
