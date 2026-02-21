@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+
+STATE_FILENAME = ".agent-worklog-state.json"
+LOG_FILENAME = ".agent-worklog.jsonl"
+
+
+def run_git(args: List[str], cwd: Optional[pathlib.Path] = None, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd) if cwd else None,
+        check=check,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def detect_repo_root(cwd: pathlib.Path) -> pathlib.Path:
+    p = run_git(["rev-parse", "--show-toplevel"], cwd=cwd, check=False)
+    if p.returncode != 0:
+        return cwd
+    out = p.stdout.strip()
+    if not out:
+        return cwd
+    return pathlib.Path(out).resolve()
+
+
+def detect_git_dir(cwd: pathlib.Path) -> pathlib.Path:
+    p = run_git(["rev-parse", "--git-dir"], cwd=cwd, check=False)
+    if p.returncode != 0:
+        return (cwd / ".git").resolve()
+    out = p.stdout.strip()
+    if not out:
+        return (cwd / ".git").resolve()
+    git_dir = pathlib.Path(out)
+    if not git_dir.is_absolute():
+        git_dir = (cwd / git_dir).resolve()
+    return git_dir.resolve()
+
+
+def detect_branch(cwd: pathlib.Path) -> str:
+    p = run_git(["branch", "--show-current"], cwd=cwd, check=False)
+    if p.returncode == 0:
+        branch = p.stdout.strip()
+        if branch:
+            return branch
+    p = run_git(["rev-parse", "--short", "HEAD"], cwd=cwd, check=False)
+    if p.returncode == 0:
+        commit = p.stdout.strip()
+        if commit:
+            return f"detached-{commit}"
+    return "detached"
+
+
+def now_iso_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_iso_ts(value: str) -> dt.datetime:
+    v = value.strip()
+    if v.endswith("Z"):
+        d = dt.datetime.fromisoformat(v[:-1])
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+    else:
+        d = dt.datetime.fromisoformat(v)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone(dt.timezone.utc)
+
+
+def parse_cli(argv: List[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Append local worklog announcements and read updates from a shared agent log."
+    )
+    p.add_argument("--peek", action="store_true", help="Read updates without advancing the last-read timestamp.")
+    p.add_argument("--since", metavar="TIMESTAMP", help="Read all messages since ISO timestamp (e.g. 2026-02-21T20:00:00Z).")
+    p.add_argument(
+        "--from",
+        dest="from_agents",
+        action="append",
+        default=[],
+        metavar="AGENT",
+        help="Only read updates from specific agent names/branches. Repeatable; also accepts comma-separated list.",
+    )
+    p.add_argument("announcements", nargs="*", help="Announcement text or JSON object.")
+    args = p.parse_args(argv)
+    if args.since:
+        try:
+            args.since_dt = parse_iso_ts(args.since)
+        except ValueError:
+            p.error(f"invalid --since timestamp: {args.since!r}")
+    else:
+        args.since_dt = None
+    return args
+
+
+def normalize_from_agents(values: List[str]) -> Set[str]:
+    out: Set[str] = set()
+    for raw in values:
+        for token in raw.split(","):
+            name = token.strip()
+            if name:
+                out.add(name)
+    return out
+
+
+def normalize_announcement(raw: str, from_branch: str) -> Dict[str, object]:
+    try:
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError("announcement must be a JSON object")
+    except Exception:
+        obj = {"message": raw}
+    if "timestamp" not in obj and "ts" not in obj:
+        obj["timestamp"] = now_iso_utc()
+    obj["from"] = from_branch
+    return obj
+
+
+def append_local_announcements(log_file: pathlib.Path, announcements: Iterable[str], from_branch: str) -> None:
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = log_file.with_suffix(log_file.suffix + ".lock")
+    with lock_file.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with log_file.open("a", encoding="utf-8") as f:
+                for raw in announcements:
+                    obj = normalize_announcement(raw, from_branch)
+                    f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def load_state_since(state_file: pathlib.Path) -> Tuple[Optional[dt.datetime], int]:
+    if not state_file.is_file():
+        return None, 0
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None, 0
+    if not isinstance(data, dict):
+        return None, 0
+    value = data.get("last_timestamp", data.get("since"))
+    count = data.get("last_timestamp_count", 0)
+    try:
+        count_i = int(count)
+    except Exception:
+        count_i = 0
+    if count_i < 0:
+        count_i = 0
+    if not isinstance(value, str) or not value.strip():
+        return None, 0
+    try:
+        return parse_iso_ts(value), count_i
+    except ValueError:
+        return None, 0
+
+
+def isoformat_utc(value: dt.datetime) -> str:
+    d = value.astimezone(dt.timezone.utc)
+    if d.microsecond:
+        return d.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def save_state_since(state_file: pathlib.Path, since_dt: dt.datetime, since_count: int) -> None:
+    payload = {"version": 2, "last_timestamp": isoformat_utc(since_dt), "last_timestamp_count": max(0, since_count)}
+    tmp = state_file.with_suffix(state_file.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(state_file)
+
+
+def read_complete_lines(log_file: pathlib.Path, cursor: int) -> Tuple[bytes, int]:
+    with log_file.open("rb") as f:
+        f.seek(cursor, os.SEEK_SET)
+        payload = f.read()
+    if not payload:
+        return b"", cursor
+    last_newline = payload.rfind(b"\n")
+    if last_newline < 0:
+        return b"", cursor
+    consumed = last_newline + 1
+    return payload[:consumed], cursor + consumed
+
+
+def parse_jsonl_lines(payload: bytes, strict: bool) -> Tuple[List[Dict[str, object]], bool]:
+    updates: List[Dict[str, object]] = []
+    text = payload.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                return [], False
+            entry = {"message": line, "invalid_json": True}
+        if not isinstance(entry, dict):
+            if strict:
+                return [], False
+            entry = {"message": line, "invalid_json": True}
+        updates.append(entry)
+    return updates, True
+
+
+def read_payload_with_retries(log_file: pathlib.Path, cursor: int, attempts: int = 3) -> Tuple[bytes, int]:
+    payload = b""
+    new_cursor = cursor
+    for i in range(attempts):
+        payload, new_cursor = read_complete_lines(log_file, cursor)
+        if not payload:
+            return b"", cursor
+        _, ok = parse_jsonl_lines(payload, strict=True)
+        if ok:
+            return payload, new_cursor
+        if i < attempts - 1:
+            time.sleep(0.03)
+    return payload, new_cursor
+
+
+def entry_timestamp(entry: object) -> Optional[dt.datetime]:
+    if not isinstance(entry, dict):
+        return None
+    v = entry.get("timestamp", entry.get("ts"))
+    if not isinstance(v, str):
+        return None
+    try:
+        return parse_iso_ts(v)
+    except ValueError:
+        return None
+
+
+def filter_by_since(updates: List[Dict[str, object]], since_dt: Optional[dt.datetime]) -> List[Dict[str, object]]:
+    if since_dt is None:
+        return updates
+    out: List[Dict[str, object]] = []
+    for row in updates:
+        entry: object = row
+        maybe_nested = row.get("entry")
+        if isinstance(maybe_nested, dict):
+            entry = maybe_nested
+        ts = entry_timestamp(entry)
+        if ts is not None and ts >= since_dt:
+            out.append(row)
+    return out
+
+
+def matches_from_filter(from_value: object, from_agents: Set[str]) -> bool:
+    if not isinstance(from_value, str):
+        return False
+    if from_value in from_agents:
+        return True
+    return from_value.replace("/", "_") in from_agents
+
+
+def max_entry_timestamp(updates: List[Dict[str, object]]) -> Optional[dt.datetime]:
+    latest: Optional[dt.datetime] = None
+    for row in updates:
+        entry: object = row
+        maybe_nested = row.get("entry")
+        if isinstance(maybe_nested, dict):
+            entry = maybe_nested
+        ts = entry_timestamp(entry)
+        if ts is None:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
+def count_entries_at_timestamp(updates: List[Dict[str, object]], target: dt.datetime) -> int:
+    n = 0
+    for row in updates:
+        entry: object = row
+        maybe_nested = row.get("entry")
+        if isinstance(maybe_nested, dict):
+            entry = maybe_nested
+        ts = entry_timestamp(entry)
+        if ts is not None and ts == target:
+            n += 1
+    return n
+
+
+def skip_seen_since_boundary(
+    updates: List[Dict[str, object]],
+    since_dt: Optional[dt.datetime],
+    seen_count: int,
+) -> List[Dict[str, object]]:
+    if since_dt is None or seen_count <= 0:
+        return updates
+    out: List[Dict[str, object]] = []
+    skipped = 0
+    for row in updates:
+        entry: object = row
+        maybe_nested = row.get("entry")
+        if isinstance(maybe_nested, dict):
+            entry = maybe_nested
+        ts = entry_timestamp(entry)
+        if ts is not None and ts == since_dt and skipped < seen_count:
+            skipped += 1
+            continue
+        out.append(row)
+    return out
+
+
+def read_other_agents(
+    log_file: pathlib.Path,
+    current_agent: str,
+    from_agents: Set[str],
+    since_dt: Optional[dt.datetime],
+    since_count: int,
+) -> Tuple[List[Dict[str, object]], Optional[dt.datetime], int]:
+    if not log_file.is_file():
+        return [], None, 0
+
+    payload, _ = read_payload_with_retries(log_file, 0)
+    if not payload:
+        return [], None, 0
+
+    updates, ok = parse_jsonl_lines(payload, strict=True)
+    if not ok:
+        updates, _ = parse_jsonl_lines(payload, strict=False)
+
+    updates_since = filter_by_since(updates, since_dt)
+    newest_ts = max_entry_timestamp(updates_since)
+    newest_ts_count = count_entries_at_timestamp(updates_since, newest_ts) if newest_ts is not None else 0
+    updates = skip_seen_since_boundary(updates_since, since_dt=since_dt, seen_count=since_count)
+    out: List[Dict[str, object]] = []
+    for row in updates:
+        from_value = row.get("from")
+        if isinstance(from_value, str) and from_value == current_agent:
+            continue
+        if from_agents and not matches_from_filter(from_value, from_agents):
+            continue
+        out.append(row)
+    return out, newest_ts, newest_ts_count
+
+
+def main(argv: List[str]) -> int:
+    args = parse_cli(argv)
+    cwd = pathlib.Path.cwd().resolve()
+    repo_root = detect_repo_root(cwd)
+    git_dir = detect_git_dir(cwd)
+    branch = detect_branch(cwd)
+
+    if args.announcements:
+        append_local_announcements(git_dir / LOG_FILENAME, args.announcements, branch)
+
+    state_file = repo_root / STATE_FILENAME
+    state_since, state_since_count = load_state_since(state_file)
+    effective_since = args.since_dt
+    effective_since_count = 0
+    if effective_since is None and state_since is not None:
+        effective_since = state_since
+        effective_since_count = state_since_count
+
+    from_agents = normalize_from_agents(args.from_agents)
+    updates, newest_ts, newest_ts_count = read_other_agents(
+        git_dir / LOG_FILENAME,
+        current_agent=branch,
+        from_agents=from_agents,
+        since_dt=effective_since,
+        since_count=effective_since_count,
+    )
+    for row in updates:
+        sys.stdout.write(json.dumps(row, separators=(",", ":")))
+        sys.stdout.write("\n")
+
+    if args.since_dt is None and not args.peek and not from_agents and newest_ts is not None:
+        should_save = False
+        if state_since is None or newest_ts > state_since:
+            should_save = True
+        elif newest_ts == state_since and newest_ts_count > state_since_count:
+            should_save = True
+        if should_save:
+            save_state_since(state_file, newest_ts, newest_ts_count)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
